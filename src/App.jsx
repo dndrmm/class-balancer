@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 
 /* =========================
- *  Helpers, caches, constants
- *  ========================= */
+ * Helpers, caches, constants
+ * ========================= */
 const scoreCache = new Map()
 const metersCache = new Map()
 // Core fields for CSV parsing. 'id' is now only an internal key.
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v1.0.3' // Print Fixes & Selection Logic
+const VERSION = 'v1.1.3' // Aesthetics: Clean Print Layout
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 // Map button labels to actual weight values
@@ -113,15 +113,15 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
   if (deviation < 0) {
     if (deviationPct <= -15) {
       colorClass = 'bg-red-600 dark:bg-red-500';
-  labelText = 'Far Below Average';
+      labelText = 'Far Below Average';
     } else if (deviationPct <= -10) {
       colorClass = 'bg-yellow-600 dark:bg-yellow-500';
-  labelText = 'Below Average';
+      labelText = 'Below Average';
     }
   } else if (deviation > 0) {
     if (deviationPct >= 10) {
       colorClass = 'bg-blue-600 dark:bg-blue-500';
-  labelText = 'Above Average';
+      labelText = 'Above Average';
     }
   } else {
     colorClass = 'bg-emerald-600 dark:bg-emerald-500';
@@ -309,7 +309,8 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
       candidates = sorted.filter(i => !violatesApartUnit(unit,i))
       if(!candidates.length) candidates = sorted
     }
-    const chosen = pickByClassNeedThenGender(candidates, unitIds)
+    // FIX: Changed unitIds (which was undefined) to unit.ids
+    const chosen = pickByClassNeedThenGender(candidates, unit.ids)
     classes[chosen].studentIds.push(...unit.ids)
   }
 
@@ -563,9 +564,91 @@ function safeParseCSV(text){
   return { students, criteriaLabels, maxScores }
 }
 
+// Minimal CSV splitter that handles quoted fields
+function splitCSV(str){
+  const res=[]
+  let cur=''; let inQ=false
+  for(let i=0;i<str.length;i++){
+    const c=str[i]
+    if(inQ){
+      if(c==='"'){
+        if(i+1<str.length && str[i+1]==='"'){ cur+='"'; i++ }
+        else inQ=false
+      } else cur+=c
+    } else {
+      if(c==='"') inQ=true
+        else if(c===',') { res.push(cur.trim()); cur='' }
+        else cur+=c
+    }
+  }
+  res.push(cur.trim())
+  return res
+}
+function mostlyNumeric(vals){
+  let num=0, tot=0
+  for(const v of vals){
+    if(!v) continue
+      tot++
+      if(!isNaN(parseFloat(v))) num++
+  }
+  return tot>0 && (num/tot > 0.6)
+}
+
+function pickClassForNewStudentBalanced(sid, classes, studentsById, criteria, cv){
+  // 1. Try to find a class where placing this student IMPROVES balance or hurts it least
+  // Simple approach: pick class with lowest average score
+  // (Alternatively: pick class that needs this gender)
+
+  const scores = classes.map((c,i)=>{
+    const ids = c.studentIds
+    const sum = ids.reduce((acc,id)=> acc + getCompositeScore(studentsById,id,criteria,cv), 0)
+    const avg = ids.length ? sum/ids.length : 0
+    return { i, avg, count: ids.length }
+  })
+  // sort by average ascending (lowest first)
+  scores.sort((a,b)=> a.avg - b.avg)
+  // pick the one with lowest average
+  return scores[0].i
+}
+
+function pickClassForNewStudentLeveled(sid, classes, studentsById, criteria, cv, levelOn){
+  // For Leveled: we need to find which class "range" fits this student's score.
+  // BUT since "Leveled" mode in this app dynamically re-sorts all students,
+  // single insertion is tricky. We'll just append to the class that "matches" best or is emptiest.
+  // For simplicity: put in the class with similar average score?
+  // Actually, let's just put in the emptiest class for now, or re-run autoPlace.
+  // Real logic: We'll put it in the class whose current avg is closest to student score.
+
+  const sScore = (levelOn==='Composite')
+  ? getCompositeScore(studentsById, sid, criteria, cv)
+  : (Number(studentsById.get(sid)?.criteria?.[levelOn])||0)
+
+  let bestI = 0, bestDiff = Infinity
+  classes.forEach((c,i)=>{
+    const ids = c.studentIds
+    if(!ids.length){
+      // empty class is a good candidate if no better match found?
+      // treat empty class avg as 0? or neutral?
+      if(bestDiff > Infinity) { bestDiff=Infinity; bestI=i } // keep looking
+    } else {
+      let sum=0
+      ids.forEach(x=>{
+        const val = (levelOn==='Composite')
+        ? getCompositeScore(studentsById, x, criteria, cv)
+        : (Number(studentsById.get(x)?.criteria?.[levelOn])||0)
+        sum+=val
+      })
+      const avg = sum/ids.length
+      const diff = Math.abs(avg - sScore)
+      if(diff < bestDiff){ bestDiff = diff; bestI = i }
+    }
+  })
+  return bestI
+}
+
 /* =========================
- *  UI: Modal
- *  ========================= */
+ * UI: Modal
+ * ========================= */
 function Modal({ open, onClose, title, children }) {
   if (!open) return null
     return (
@@ -588,8 +671,8 @@ function Modal({ open, onClose, title, children }) {
 }
 
 /* =========================
- *  Manual Pins sub-component
- *  ========================= */
+ * Manual Pins sub-component
+ * ========================= */
 function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes, setBlockedMoveMessage }){ // ADDED setBlockedMoveMessage
   const [selectedId, setSelectedId] = useState('') // FIX: Start empty to force explicit choice
   const [constraintSearch, setConstraintSearch] = useState('');
@@ -805,8 +888,82 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 }
 
 /* ==========================================
- *  MAIN APP COMPONENT (state + top utilities)
- *  ========================================== */
+ * PRINT SUMMARY COMPONENT
+ * ========================================== */
+function PrintOverview({ classes, studentsById, criteria, cv }) {
+  // Simple check: do we have classes?
+  if(!classes || !classes.length) return null
+
+    // Calculate global aggregate stats if desired, or just per-class
+    // We'll just do a clean matrix of classes.
+
+    // Filter active criteria for columns
+    const activeCriteria = criteria.filter(c => (c.weight??0) > 0 && c.enabled);
+
+  return (
+    <div className="hidden print:block mb-8 break-after-page">
+    <div className="mb-6 border-b pb-4">
+    <h1 className="text-3xl font-bold text-gray-900 mb-1">Class Placement Summary</h1>
+    <p className="text-sm text-gray-500">Generated by Class Balancer</p>
+    </div>
+
+    <table className="w-full text-sm border-collapse border border-gray-300">
+    <thead>
+    <tr className="bg-gray-100 text-left">
+    <th className="border border-gray-300 p-2 font-bold text-gray-900">Class Name</th>
+    <th className="border border-gray-300 p-2 font-bold text-gray-900 w-16 text-center">Size</th>
+    <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-center">Gender</th>
+    <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-right">Avg Score</th>
+    {activeCriteria.map(c => (
+      <th key={c.label} className="border border-gray-300 p-2 font-bold text-gray-900 text-right">
+      {c.label} (Avg)
+      </th>
+    ))}
+    </tr>
+    </thead>
+    <tbody>
+    {classes.map((c, i) => {
+      const ids = c.studentIds;
+      const relevantIds = ids.filter(id => !studentsById.get(id)?.ignoreScores);
+
+      // Gender
+      let M=0, F=0;
+      ids.forEach(id => {
+        const g = studentsById.get(id)?.gender;
+        if(g==='M') M++;
+        else if(g==='F') F++;
+      });
+
+        // Comp Score
+        const sumComp = relevantIds.reduce((acc,id)=> acc + getCompositeScore(studentsById,id,criteria,cv), 0);
+        const avgComp = relevantIds.length ? (sumComp/relevantIds.length).toFixed(1) : '-';
+
+        return (
+          <tr key={c.id} className="even:bg-gray-50">
+          <td className="border border-gray-300 p-2 font-semibold">{c.name || `Class ${i+1}`}</td>
+          <td className="border border-gray-300 p-2 text-center">{ids.length}</td>
+          <td className="border border-gray-300 p-2 text-center text-xs">
+          {M}M / {F}F
+          </td>
+          <td className="border border-gray-300 p-2 text-right font-mono">{avgComp}</td>
+          {activeCriteria.map(crit => {
+            const sum = relevantIds.reduce((acc,id) => acc + (Number(studentsById.get(id)?.criteria?.[crit.label])||0), 0);
+            const avg = relevantIds.length ? (sum/relevantIds.length).toFixed(1) : '-';
+          return <td key={crit.label} className="border border-gray-300 p-2 text-right font-mono text-gray-600">{avg}</td>
+          })}
+          </tr>
+        )
+    })}
+    </tbody>
+    </table>
+    </div>
+  )
+}
+
+
+/* ==========================================
+ * MAIN APP COMPONENT (state + top utilities)
+ * ========================================== */
 export default function App(){
   const [dark, setDark] = useState(false)
   useEffect(()=>{ document.documentElement.classList.toggle('dark', dark) }, [dark])
@@ -887,7 +1044,7 @@ export default function App(){
       dragRef.current = null
 
       // NEW: Mark that a manual change has occurred
-      setHasManualChanges(true);
+      setHasManualChanges(true); // FIX: Corrected variable name from 'setHasManual changes' to 'setHasManualChanges'
   }
 
   // clear caches when inputs change
@@ -1119,11 +1276,11 @@ export default function App(){
       const className = studentClassMap.get(id) || 'Unassigned';
 
     const base = [
-    className, // Class Name
-    s.firstName || '', // First Name
-    s.lastName || '', // Last Name
-    s.gender||'',
-    (s.tags||[]).join('; '),
+      className, // Class Name
+      s.firstName || '', // First Name
+      s.lastName || '', // Last Name
+      s.gender||'',
+      (s.tags||[]).join('; '),
                             (s.notes||'').replaceAll('\n',' '),
                             s.previousTeacher||''
     ]
@@ -1281,19 +1438,40 @@ export default function App(){
   // FIX: Added style block for clean printing
   const printStyles = `
   @media print {
-    @page { margin: 0.5cm; size: portrait; }
+    @page { margin: 1cm; size: portrait; }
     body { -webkit-print-color-adjust: exact; }
     .no-print { display: none !important; }
-    .print-break-after { page-break-after: always; break-after: page; }
+    .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
     .print-reset-grid { display: block !important; }
-    .print-clean { box-shadow: none !important; border: 1px solid #ccc !important; }
+    .print-clean { box-shadow: none !important; border: none !important; margin: 0 !important; padding: 0 !important; }
+
+    /* Ensure clean white background and sharp text */
+    body, #root { background: white !important; color: black !important; }
+
+    /* Hide the pill-based card view in print, show table view */
+    .screen-only-content { display: none !important; }
+    .print-only-content { display: block !important; }
+
+    /* Table Styling for Print */
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; }
+    th { background-color: #f3f4f6 !important; font-weight: bold; }
+
+    /* Individual Roster Container */
+    .class-roster-container {
+      margin-top: 20px;
+      margin-bottom: 20px;
+    }
   }
+
+  /* Hide print content on screen */
+  .print-only-content { display: none; }
   `;
 
   /* ============================
-   *    BEGIN RENDER (Toolbar first)
-   *    ============================ */
+   * BEGIN RENDER (Toolbar first)
+   * ============================ */
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-800 dark:text-gray-200">
     <style>{printStyles}</style>
@@ -1601,6 +1779,12 @@ export default function App(){
     </div>
     </div>
     </div>
+
+    {/* PRINT ONLY: Summary Table */}
+    <div className="max-w-9xl mx-auto px-6">
+    <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} cv={criteriaVersion} />
+    </div>
+
     {/* Classes Grid */}
     {/* FIX: Added print-reset-grid for printing */}
     <div className="max-w-9xl mx-auto px-6 mt-4 grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4 class-grid print-reset-grid">
@@ -1665,85 +1849,153 @@ export default function App(){
           ))}
           </div>
 
-          <ul
-          className="mt-3 space-y-2 min-h-[200px]"
-          onDragOver={(e)=>e.preventDefault()}
-          onDrop={(e)=>handleDrop(idx, e)}
-          >
-          {c.studentIds.map(id => {
-            const st = studentsById.get(id);
-            if (!st) return null
-              const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion)
-              // FIX: Using the first letter of the criterion label followed by a colon for cleaner display
-              // FIX: Re-added individual scores
-              const bits = criteria.filter(cc => (cc.weight ?? 0) > 0 && cc.enabled).map(cc => `${cc.label.charAt(0)}: ${st.criteria?.[cc.label] ?? 0}`)
-              return (
-                <li
-                key={id}
-                draggable
-                onDragStart={(e) => onDragStartStudent(e, id, idx)}
-                className={
-                  "border rounded-xl px-2 py-1 bg-white dark:bg-gray-800 transition-shadow " +
-                  (id === lastAddedId ? "ring-2 ring-emerald-500" : "")
-                }
+          {/* =======================================================
+            SCREEN VIEW (Card Pills)
+        ======================================================= */}
+        <ul
+        className="mt-3 space-y-2 min-h-[200px] screen-only-content"
+        onDragOver={(e)=>e.preventDefault()}
+        onDrop={(e)=>handleDrop(idx, e)}
+        >
+        {c.studentIds.map(id => {
+          const st = studentsById.get(id);
+          if (!st) return null
+            const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion)
+            // FIX: Using the first letter of the criterion label followed by a colon for cleaner display
+            // FIX: Re-added individual scores
+            const bits = criteria.filter(cc => (cc.weight ?? 0) > 0 && cc.enabled).map(cc => `${cc.label.charAt(0)}: ${st.criteria?.[cc.label] ?? 0}`)
+            return (
+              <li
+              key={id}
+              draggable
+              onDragStart={(e) => onDragStartStudent(e, id, idx)}
+              className={
+                "border rounded-xl px-2 py-1 bg-white dark:bg-gray-800 transition-shadow " +
+                (id === lastAddedId ? "ring-2 ring-emerald-500" : "")
+              }
+              >
+              <>
+              <div className="font-medium truncate flex items-center justify-between">
+              {/* FIX: Gender Chip AFTER Name, aligned right */}
+              <span className="truncate">
+              {st.name}
+              </span>
+              <span className={`text-[10px] font-bold px-1 py-0.5 rounded-full border ${getGenderClass(st.gender)} flex-shrink-0`}>
+              {st.gender?.charAt(0) || '?'}
+              </span>
+              </div>
+
+              <div className="text-[11px] text-gray-600 dark:text-gray-300">
+              Overall: <span className="font-semibold">{Math.round(overall)}</span>
+              {/* FIX: Re-added individual scores here */}
+              {bits.length ? ' · ' + bits.join(' · ') : ''}
+              </div>
+
+              {st.previousTeacher ? (
+                <div className="text-[10px] text-gray-500 dark:text-gray-400">
+                Prev: {st.previousTeacher}
+                </div>
+              ) : null}
+
+              {st.notes ? (
+                <div
+                className="text-[10px] text-gray-500 dark:text-gray-400"
+                style={{
+                  overflow: 'hidden',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  whiteSpace: 'normal'
+                }}
+                title={st.notes}
                 >
-                <>
-                <div className="font-medium truncate flex items-center justify-between">
-                {/* FIX: Gender Chip AFTER Name, aligned right */}
-                <span className="truncate">
-                {st.name}
-                </span>
-                <span className={`text-[10px] font-bold px-1 py-0.5 rounded-full border ${getGenderClass(st.gender)} flex-shrink-0`}>
-                {st.gender?.charAt(0) || '?'}
-                </span>
+                Notes: {st.notes}
                 </div>
+              ) : null}
 
-                <div className="text-[11px] text-gray-600 dark:text-gray-300">
-                Overall: <span className="font-semibold">{Math.round(overall)}</span>
-                {/* FIX: Re-added individual scores here */}
-                {bits.length ? ' · ' + bits.join(' · ') : ''}
-                </div>
-
-                {st.previousTeacher ? (
-                  <div className="text-[10px] text-gray-500 dark:text-gray-400">
-                  Prev: {st.previousTeacher}
-                  </div>
-                ) : null}
-
-                {st.notes ? (
-                  <div
-                  className="text-[10px] text-gray-500 dark:text-gray-400"
-                  style={{
-                    overflow: 'hidden',
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                    whiteSpace: 'normal'
-                  }}
-                  title={st.notes}
+              {Array.isArray(st.tags) && st.tags.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1">
+                {st.tags.map(tag => (
+                  <span
+                  key={tag}
+                  className="text-[10px] px-1.5 py-0.5 border rounded-full bg-white dark:bg-gray-800"
                   >
-                  Notes: {st.notes}
-                  </div>
-                ) : null}
+                  {tag}
+                  </span>
+                ))}
+                </div>
+              ) : null}
+              </>
+              </li>
+            )
+        })}
+        </ul>
 
-                {Array.isArray(st.tags) && st.tags.length > 0 ? (
-                  <div className="mt-1 flex flex-wrap gap-1">
-                  {st.tags.map(tag => (
-                    <span
-                    key={tag}
-                    className="text-[10px] px-1.5 py-0.5 border rounded-full bg-white dark:bg-gray-800"
-                    >
-                    {tag}
-                    </span>
-                  ))}
-                  </div>
-                ) : null}
-                </>
-                </li>
-              )
-          })}
-          </ul>
-          </div>
+        {/* =======================================================
+          PRINT VIEW (Clean Table)
+        ======================================================= */}
+        <div className="print-only-content class-roster-container">
+        {/* Header with Stats Inline */}
+        <div className="flex items-end justify-between border-b-2 border-gray-800 mb-2 pb-1">
+        <h2 className="text-xl font-bold text-black leading-none">{classMeta[idx]?.name ?? c.name}</h2>
+        <div className="text-xs font-mono text-gray-600 leading-none">
+        <span className="mr-3 font-bold text-black">Total: {c.studentIds.length}</span>
+        <span className="mr-2">Boys: {s.M}</span>
+        <span>Girls: {s.F}</span>
+        </div>
+        </div>
+
+        <table className="w-full text-xs border-collapse">
+        <thead>
+        <tr className="border-b border-gray-400 text-left">
+        <th className="py-1 font-bold text-black w-[20%]">Student Name</th>
+        <th className="py-1 font-bold text-black w-[5%] text-center">Gen</th>
+        <th className="py-1 font-bold text-black w-[10%]">Tags</th>
+        <th className="py-1 font-bold text-black w-[5%] text-right">Score</th>
+        {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => (
+          <th key={crit.label} className="py-1 font-bold text-gray-600 text-right w-[5%] text-[10px] uppercase">
+          {crit.label.substring(0,3)}
+          </th>
+        ))}
+        <th className="py-1 font-bold text-black w-[15%] pl-2">Prev Teacher</th>
+        <th className="py-1 font-bold text-black w-auto pl-2">Notes</th>
+        </tr>
+        </thead>
+        <tbody>
+        {c.studentIds.map((id, rowIndex) => {
+          const st = studentsById.get(id);
+          if(!st) return null;
+          const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion);
+
+          return (
+            <tr key={id} className={`border-b border-gray-200 ${rowIndex % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
+            <td className="py-1 font-semibold text-black whitespace-nowrap overflow-hidden text-ellipsis">
+            {st.lastName}, {st.firstName}
+            </td>
+            <td className="py-1 text-center text-black font-mono">{st.gender}</td>
+            <td className="py-1 text-[10px] text-gray-600 leading-tight">
+            {(st.tags || []).join(', ')}
+            </td>
+            <td className="py-1 text-right font-mono text-black">{Math.round(overall)}</td>
+            {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => (
+              <td key={crit.label} className="py-1 text-right text-gray-500 font-mono text-[10px]">
+              {st.criteria?.[crit.label] ?? 0}
+              </td>
+            ))}
+            <td className="py-1 text-gray-700 text-[10px] pl-2 whitespace-nowrap overflow-hidden text-ellipsis">
+            {st.previousTeacher}
+            </td>
+            <td className="py-1 text-gray-700 text-[10px] pl-2 italic leading-tight">
+            {st.notes}
+            </td>
+            </tr>
+          );
+        })}
+        </tbody>
+        </table>
+        </div>
+
+        </div>
         )
       })
     })()}
