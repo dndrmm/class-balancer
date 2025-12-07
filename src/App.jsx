@@ -699,7 +699,7 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
         <div key={type} className="lg:col-span-4 flex flex-col h-full">
         <div className="flex items-center justify-between mb-2">
         <div className={`text-sm font-bold ${isKeepWith ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
-        {isKeepWith ? 'Keep With (Group)' : 'Separate From (Conflict)'}
+        {isKeepWith ? 'Keep With' : 'Separate From'}
         </div>
         <button className="text-xs font-medium text-slate-400 hover:text-rose-500 transition" onClick={()=>batchPatchStudents([{id:selectedId, patch:{[type]:[]}}])}>Clear All</button>
         </div>
