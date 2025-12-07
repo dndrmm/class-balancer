@@ -5,14 +5,12 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
  * ========================= */
 const scoreCache = new Map()
 const metersCache = new Map()
-// Core fields for CSV parsing. 'id' is now only an internal key.
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v1.1.3' // Aesthetics: Clean Print Layout
+const VERSION = 'v2.0.4'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
-// Map button labels to actual weight values
 const WEIGHT_MAP = {
   'Low': 0.5,
   'Normal': 1.0,
@@ -22,7 +20,6 @@ const WEIGHT_MAP = {
   2.0: 'High'
 };
 
-// LOOKUP: Maps letters A-Z to 1-26 for standardized level conversion (Guided Reading, etc.).
 const LETTER_GRADE_MAP = (() => {
   const map = {};
   for (let i = 0; i < 26; i++) {
@@ -33,8 +30,7 @@ const LETTER_GRADE_MAP = (() => {
 })();
 
 function makeCriteriaVersion(criteria){
-  // Criteria version string affects cache key
-  return criteria.map(c=>`${c.label}:${c.weight}:${c.max}`).join('|')
+  return criteria.map(c=>`${c.label}:${c.weight}:${c.max}:${c.enabled}`).join('|')
 }
 
 function getCompositeScore(studentsById, id, criteria, cv){
@@ -48,13 +44,11 @@ function getCompositeScore(studentsById, id, criteria, cv){
       return 0
     }
 
-    // LOGIC: If student scores are ignored (e.g., Pull-out programs), return 0
     if (s.ignoreScores) {
       scoreCache.set(key, 0);
       return 0;
     }
 
-    // Sum criteria values, normalized by weight
     const val = criteria
     .reduce((acc, c) => {
       const v = Number(s.criteria?.[c.label]) || 0
@@ -67,18 +61,13 @@ function getCompositeScore(studentsById, id, criteria, cv){
 }
 
 function getAverageCriteriaScore(studentsById, allIds, criterionLabel) {
-  // Only calculate average among students whose scores are NOT ignored
   const relevantIds = allIds.filter(id => !studentsById.get(id)?.ignoreScores);
-
   if (relevantIds.length === 0) return 0;
-
   const totalScore = relevantIds.reduce((sum, id) => {
     return sum + (Number(studentsById.get(id)?.criteria?.[criterionLabel]) || 0);
   }, 0);
-
   return totalScore / relevantIds.length;
 }
-
 
 function calcMeters(cls, studentsById, criteria, allIds, cv){
   const rosterSig = cls.studentIds.join(',')
@@ -88,7 +77,6 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
 
     const calculatedStudents = cls.studentIds.filter(id => !studentsById.get(id)?.ignoreScores);
   const calculatedStudentCount = calculatedStudents.length;
-
   const activeCriteria = criteria.filter(c => c.enabled);
 
   const meters = activeCriteria.map(c=>{
@@ -100,38 +88,34 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
       avg = totalCriteriaScore / calculatedStudentCount;
     }
 
-    // Calculate meter percentage (pct) based on the calculated average
     const pct = Math.max(0, Math.min(100, (avg/(c.max||100))*100))
-
     const globalAvg = getAverageCriteriaScore(studentsById, allIds, c.label);
     const deviation = avg - globalAvg;
     const deviationPct = (deviation / (globalAvg || 1)) * 100;
 
-    let colorClass = 'bg-emerald-600 dark:bg-emerald-500';
+    let colorClass = 'bg-emerald-500';
     let labelText = 'Balanced';
 
   if (deviation < 0) {
     if (deviationPct <= -15) {
-      colorClass = 'bg-red-600 dark:bg-red-500';
+      colorClass = 'bg-rose-500';
       labelText = 'Far Below Average';
     } else if (deviationPct <= -10) {
-      colorClass = 'bg-yellow-600 dark:bg-yellow-500';
+      colorClass = 'bg-amber-500';
       labelText = 'Below Average';
     }
   } else if (deviation > 0) {
     if (deviationPct >= 10) {
-      colorClass = 'bg-blue-600 dark:bg-blue-500';
+      colorClass = 'bg-indigo-500';
       labelText = 'Above Average';
     }
-  } else {
-    colorClass = 'bg-emerald-600 dark:bg-emerald-500';
-    labelText = 'Balanced';
   }
 
   return { label:c.label, pct, colorClass, avg, globalAvg, labelText };
   })
   metersCache.set(key, meters); return meters
 }
+
 function stats(studentsById, ids){
   const n = ids.length
   let F=0, M=0
@@ -164,7 +148,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
     const meta = classMeta?.[i] || {}
     return { id:`Class ${i+1}`, name: meta.name || `Class ${i+1}`, studentIds:[] }
   })
-
   const targetBase = Math.floor(allIds.length / n)
   const remainder = allIds.length % n
   const capacity = classes.map((_,i)=> targetBase + (i < remainder ? 1 : 0))
@@ -175,7 +158,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
     if(Number.isInteger(pc) && pc>=0 && pc<n) pinMap.set(id, pc)
   })
 
-  // union-find for keep-together
   const parent = new Map(allIds.map(id=>[id,id]))
   const find = (x)=>{ while(parent.get(x)!==x){ parent.set(x,parent.get(parent.get(x))); x = parent.get(x) } return x }
   const union = (a,b)=>{ const ra=find(a), rb=find(b); if(ra!==rb) parent.set(ra, rb) }
@@ -184,7 +166,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
   const comps = new Map()
   allIds.forEach(id => { const r=find(id); if(!comps.has(r)) comps.set(r, []); comps.get(r).push(id) })
 
-  // turn components into placeable "units", propagate pins if consistent
   const units = []
   for(const comp of comps.values()){
     const byPin = new Map()
@@ -202,7 +183,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
       whole.forEach(id => pinMap.set(id, pIdx))
       units.push({ ids: whole, target: pIdx })
     }else if(pinnedKeys.length > 1){
-      // split inconsistent pins
       for(const k of pinnedKeys){
         const chunk = byPin.get(k)
         const pIdx = Number(k.slice(1))
@@ -216,7 +196,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
   }
 
   const apartSet = new Set(keepApartPairs.map(([a,b])=>`${a}|${b}`))
-
   const cv = makeCriteriaVersion(criteria)
   const avgScore = (ids)=> ids.reduce((a,id)=>a+(getCompositeScore(studentsById,id,criteria,cv)),0)/ids.length
 
@@ -231,43 +210,17 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
     }} return false
   }
 
-  // helpers for "need" and gender tiebreak
-  const classAvg = (ci) => {
-    const ids = classes[ci].studentIds
-    if (!ids.length) return 0
-      // FIX: Class average calculation must ignore students with ignoreScores = true
-      const relevantIds = ids.filter(id => !studentsById.get(id)?.ignoreScores);
-    if (relevantIds.length === 0) return 0;
-
-    const total = relevantIds.reduce((a,id)=> a + getCompositeScore(studentsById,id,criteria,cv), 0)
-    return total / relevantIds.length
-  }
-  const unitAvg = (ids) => ids.length? ids.reduce((a,id)=> a + getCompositeScore(studentsById,id,criteria,cv),0)/ids.length : 0
   const classAvgAfter = (ci, unitIds) => {
-    // FIX: Ensure calculation ignores ignored students
     const existingRelevantIds = classes[ci].studentIds.filter(id => !studentsById.get(id)?.ignoreScores);
     const incomingRelevantIds = unitIds.filter(id => !studentsById.get(id)?.ignoreScores);
-
     const currentN = existingRelevantIds.length;
     const incomingN = incomingRelevantIds.length;
-
     if (currentN + incomingN === 0) return 0;
-
     const currentTotal = existingRelevantIds.reduce((a,id)=> a + getCompositeScore(studentsById,id,criteria,cv), 0);
     const addTotal = incomingRelevantIds.reduce((a,id)=> a + getCompositeScore(studentsById,id,criteria,cv), 0);
-
     return (currentTotal + addTotal) / (currentN + incomingN);
   }
-  const genderCounts = (ids=[]) => {
-    let M=0, F=0
-    for(const id of ids){
-      const g = studentsById.get(id)?.gender
-      if(g==='M') M++; else if(g==='F') F++
-    }
-    return {M,F}
-  }
 
-  // FIX: pickByGenderImbalance is now defined above, so it can be called here
   const pickByClassNeedThenGender = (candidateIndexes, unitIds) => {
     let best = []; let bestVal = Infinity
     for (const i of candidateIndexes) {
@@ -279,7 +232,6 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
       return pickByGenderImbalance(best, unitIds, classes, studentsById)
   }
 
-  // place pinned units
   for(const unit of pinnedUnits){
     const ci = unit.target
     if(!violatesApartUnit(unit, ci)){
@@ -296,25 +248,19 @@ function autoPlace(studentsById, allIds, n, { criteria, keepTogetherPairs, keepA
     }
   }
 
-  // place free units
   for(const unit of freeUnits){
     const sizes = classes.map(c=>c.studentIds.length)
     const minSize = Math.min(...sizes)
-    let candidates = sizes
-    .map((sz,i)=> (sz===minSize? i : null))
-    .filter(i=>i!==null)
-    .filter(i => fitsClass(unit,i) && !violatesApartUnit(unit,i))
+    let candidates = sizes.map((sz,i)=> (sz===minSize? i : null)).filter(i=>i!==null).filter(i => fitsClass(unit,i) && !violatesApartUnit(unit,i))
     if(!candidates.length){
       const sorted = classes.map((c,i)=>({i, size:c.studentIds.length})).sort((a,b)=>a.size-b.size).map(x=>x.i)
       candidates = sorted.filter(i => !violatesApartUnit(unit,i))
       if(!candidates.length) candidates = sorted
     }
-    // FIX: Changed unitIds (which was undefined) to unit.ids
     const chosen = pickByClassNeedThenGender(candidates, unit.ids)
     classes[chosen].studentIds.push(...unit.ids)
   }
 
-  // dedupe just in case
   const seen = new Set()
   for (const c of classes) {
     c.studentIds = c.studentIds.filter(id => {
@@ -339,7 +285,6 @@ function leveledPlace(studentsById, allIds, n, { criteria, levelOn, keepTogether
     const pc = studentsById.get(id)?.pinClass
     if(Number.isInteger(pc) && pc>=0 && pc<n) pinMap.set(id, pc)
   })
-  // union-find for keep-together
   const parent = new Map(allIds.map(id=>[id,id]))
   const find = (x)=>{ while(parent.get(x)!==x){ parent.set(x,parent.get(parent.get(x))); x = parent.get(x) } return x }
   const union = (a,b)=>{ const ra=find(a), rb=find(b); if(ra!==rb) parent.set(ra, rb) }
@@ -394,56 +339,40 @@ function leveledPlace(studentsById, allIds, n, { criteria, levelOn, keepTogether
 
   const pinnedUnits = units.filter(u=>u.target!=null)
   const freeUnits   = units.filter(u=>u.target==null)
-  // Sort ALL units from highest score to lowest score
   freeUnits.sort((a,b)=> unitScore(b.ids) - unitScore(a.ids))
 
-  // --- Strict Cut-Point Assignment Logic ---
-
-  // 1. Place pinned units first
   for(const unit of pinnedUnits){
     const ci = unit.target
     if(!violatesApartUnit(unit, ci)){
       classes[ci].studentIds.push(...unit.ids)
     } else {
-      // If pinned unit violates constraint/capacity, try to place it close by
       const order = [...Array(n).keys()]
       let placed=false
       for(const alt of order){
         if(fitsClass(unit, alt) && !violatesApartUnit(unit, alt)) { classes[alt].studentIds.push(...unit.ids); placed=true; break }
       }
-      // If still fails, force it into the pinned class (may violate capacity/constraint)
       if(!placed) classes[ci].studentIds.push(...unit.ids)
     }
   }
 
-  // 2. Place free units sequentially based on sorted order
   let currentClassIndex = 0;
   for(const unit of freeUnits){
     let placed = false;
-
-    // Attempt to place in the current target class (highest score class = Class 1, etc.)
     for (let i = currentClassIndex; i < n; i++) {
       if (fitsClass(unit, i) && !violatesApartUnit(unit, i)) {
         classes[i].studentIds.push(...unit.ids);
-        currentClassIndex = i; // Stay on this class until it's full
+        currentClassIndex = i;
         placed = true;
         break;
       }
     }
-
-    // If it couldn't fit in the ideal class or subsequent classes (due to capacity/constraint),
-    // try any class to ensure all students are placed (but prioritize nearest valid)
     if (!placed) {
       const order = [...Array(n).keys()].sort((a,b)=>a-b);
       for(const alt of order){
         if(fitsClass(unit, alt) && !violatesApartUnit(unit, alt)) { classes[alt].studentIds.push(...unit.ids); placed=true; break }
       }
-      // Worst case: force placement in the last checked spot (shouldn't happen with capacity checks)
       if(!placed) classes[currentClassIndex].studentIds.push(...unit.ids)
     }
-
-    // After placing a unit, if the current class is full, advance the pointer
-    // We only advance the pointer AFTER the unit has been placed.
     if (classes[currentClassIndex].studentIds.length >= capacity[currentClassIndex] && currentClassIndex < n - 1) {
       currentClassIndex++;
     }
@@ -462,24 +391,18 @@ function leveledPlace(studentsById, allIds, n, { criteria, levelOn, keepTogether
 function safeParseCSV(text){
   const raw = String(text||'').replace(/^\uFEFF/,'')
   const lines = raw.split(/\r\n|\n|\r/).filter(l=>l && l.trim().length > 0)
-
   if(!lines.length) return {students:[],criteriaLabels:[], maxScores:{}}
 
   const headersRaw = splitCSV(lines[0].trim()).map(h=>h.trim())
   const headersNorm = headersRaw.map(h=>norm(h))
-  const hasId = headersNorm.includes('id')
-  const hasFirst = headersNorm.includes('firstname')
-  const hasLast = headersNorm.includes('lastname')
   const hasSingleName = headersNorm.includes('name')
 
   const body = lines.slice(1);
   const rows = body.map(splitCSV);
-
   const colCells = headersRaw.map((_,i)=> rows.map(r=>r[i]??''))
   const coreFieldsSet = new Set(['id', 'firstname', 'lastname', 'name', 'gender', 'tags', 'notes', 'previousteacher', 'previous_teacher'])
   const criteriaLabels = headersRaw.filter((h,i)=> !coreFieldsSet.has(headersNorm[i]) && mostlyNumeric(colCells[i]||[]) )
 
-  // 1. Determine max score (and collect parsed numerical values) for each criterion
   const maxScores = {}
   const parsedCriteriaValues = new Map()
 
@@ -487,40 +410,30 @@ function safeParseCSV(text){
     const columnIndex = headersRaw.findIndex(h => h.trim() === label);
     let max = 0;
     const values = [];
-
     if (columnIndex !== -1) {
       rows.forEach(row => {
         const rawValue = (row[columnIndex] || '').trim();
         let value = 0;
-
         if (rawValue) {
           const numValue = parseFloat(rawValue);
           if (!isNaN(numValue)) {
             value = numValue;
           } else {
-            // Convert letter grade (e.g., A, B, C) to number (1, 2, 3)
             value = LETTER_GRADE_MAP[rawValue.toUpperCase()] || 0;
           }
         }
-
         values.push(value);
-        if (value > max) {
-          max = value;
-        }
+        if (value > max) max = value;
       });
     }
-
     maxScores[label] = max > 0 ? max : 100;
     parsedCriteriaValues.set(label, values);
   });
 
-
-  // 2. Create student objects using the parsed numerical values
   const students=[]
   for(let r=0;r<rows.length;r++){
     const cols=rows[r];
     const byNorm={};
-    // FIX: Corrected the syntax error in the assignment: byNorm[hn] = (cols[i]??'').trim()
     headersNorm.forEach((hn,i)=> byNorm[hn] = (cols[i]??'').trim());
 
     const hasNameData = byNorm['firstname'] || byNorm['lastname'] || byNorm['name'];
@@ -532,7 +445,6 @@ function safeParseCSV(text){
     });
 
     const previousTeacher = byNorm['previousteacher'] || byNorm['previous_teacher'] || ''
-
     let firstName = byNorm['firstname'] || '';
     let lastName = byNorm['lastname'] || '';
 
@@ -564,7 +476,6 @@ function safeParseCSV(text){
   return { students, criteriaLabels, maxScores }
 }
 
-// Minimal CSV splitter that handles quoted fields
 function splitCSV(str){
   const res=[]
   let cur=''; let inQ=false
@@ -595,30 +506,17 @@ function mostlyNumeric(vals){
 }
 
 function pickClassForNewStudentBalanced(sid, classes, studentsById, criteria, cv){
-  // 1. Try to find a class where placing this student IMPROVES balance or hurts it least
-  // Simple approach: pick class with lowest average score
-  // (Alternatively: pick class that needs this gender)
-
   const scores = classes.map((c,i)=>{
     const ids = c.studentIds
     const sum = ids.reduce((acc,id)=> acc + getCompositeScore(studentsById,id,criteria,cv), 0)
     const avg = ids.length ? sum/ids.length : 0
     return { i, avg, count: ids.length }
   })
-  // sort by average ascending (lowest first)
   scores.sort((a,b)=> a.avg - b.avg)
-  // pick the one with lowest average
   return scores[0].i
 }
 
 function pickClassForNewStudentLeveled(sid, classes, studentsById, criteria, cv, levelOn){
-  // For Leveled: we need to find which class "range" fits this student's score.
-  // BUT since "Leveled" mode in this app dynamically re-sorts all students,
-  // single insertion is tricky. We'll just append to the class that "matches" best or is emptiest.
-  // For simplicity: put in the class with similar average score?
-  // Actually, let's just put in the emptiest class for now, or re-run autoPlace.
-  // Real logic: We'll put it in the class whose current avg is closest to student score.
-
   const sScore = (levelOn==='Composite')
   ? getCompositeScore(studentsById, sid, criteria, cv)
   : (Number(studentsById.get(sid)?.criteria?.[levelOn])||0)
@@ -627,9 +525,7 @@ function pickClassForNewStudentLeveled(sid, classes, studentsById, criteria, cv,
   classes.forEach((c,i)=>{
     const ids = c.studentIds
     if(!ids.length){
-      // empty class is a good candidate if no better match found?
-      // treat empty class avg as 0? or neutral?
-      if(bestDiff > Infinity) { bestDiff=Infinity; bestI=i } // keep looking
+      if(bestDiff > Infinity) { bestDiff=Infinity; bestI=i }
     } else {
       let sum=0
       ids.forEach(x=>{
@@ -653,18 +549,18 @@ function Modal({ open, onClose, title, children }) {
   if (!open) return null
     return (
       <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm transition-opacity"
       onClick={onClose}
       >
       <div
-      className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-[min(700px,92vw)] max-h-[86vh] overflow-auto border"
+      className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-[min(700px,92vw)] max-h-[86vh] overflow-auto border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-200"
       onClick={(e)=>e.stopPropagation()}
       >
-      <div className="flex items-center justify-between px-4 py-3 border-b">
-      <div className="font-semibold">{title}</div>
-      <button className="text-sm px-2 py-1 rounded border" onClick={onClose}>Close</button>
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+      <div className="font-bold text-lg text-slate-800 dark:text-white">{title}</div>
+      <button className="text-sm px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 transition" onClick={onClose}>Close</button>
       </div>
-      <div className="p-4">{children}</div>
+      <div className="p-6">{children}</div>
       </div>
       </div>
     )
@@ -673,11 +569,10 @@ function Modal({ open, onClose, title, children }) {
 /* =========================
  * Manual Pins sub-component
  * ========================= */
-function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes, setBlockedMoveMessage }){ // ADDED setBlockedMoveMessage
-  const [selectedId, setSelectedId] = useState('') // FIX: Start empty to force explicit choice
+function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes, setBlockedMoveMessage }){
+  const [selectedId, setSelectedId] = useState('')
   const [constraintSearch, setConstraintSearch] = useState('');
 
-  // FIX: Removed useEffect that auto-selected first student
   useEffect(()=>{
     if (selectedId && !allIds.includes(selectedId)) setSelectedId('');
   }, [allIds, selectedId])
@@ -685,7 +580,6 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
   const s = selectedId ? studentsById.get(selectedId) : null
   const sortedIds = useMemo(()=> [...allIds].sort((a,b)=> (studentsById.get(a)?.name||'').localeCompare(studentsById.get(b)?.name||'')), [allIds, studentsById])
 
-  // FIX: Updated patchStudent to handle batch updates to the map
   function batchPatchStudents(updates){
     setStudentsById(prev=>{
       const m=new Map(prev);
@@ -696,32 +590,24 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
     })
   }
 
-  // Deprecated single patch function (kept for other component parts if needed)
   function patchStudent(id, patch){
     batchPatchStudents([{id, patch}]);
   }
 
   const togglePin = (type, targetId) => {
-
     const targetStudent = studentsById.get(targetId);
     const selectedStudentName = s?.name || selectedId;
     const targetStudentName = targetStudent?.name || targetId;
 
-    // --- Determine Constraint Types ---
     const isSettingKeepWith = type === 'pinKeepWith';
     const currentArray = s?.[type] || [];
     const isCurrentlySet = currentArray.includes(targetId);
 
     if (isCurrentlySet) {
-      // --- ACTION: REMOVE CONSTRAINT ---
       const newArray = currentArray.filter(id => id !== targetId);
-
-      // RECIPROCAL ACTION: Remove the reciprocal constraint from targetId
       const reciprocalType = isSettingKeepWith ? 'pinKeepWith' : 'pinKeepApart';
       const targetArray = targetStudent?.[reciprocalType] || [];
       const newTargetArray = targetArray.filter(id => id !== selectedId);
-
-      // Batch update both students
       batchPatchStudents([
         { id: selectedId, patch: { [type]: newArray } },
         { id: targetId, patch: { [reciprocalType]: newTargetArray } }
@@ -729,39 +615,26 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
       return;
     }
 
-    // --- ACTION: ADD NEW CONSTRAINT ---
-
-    // 1. Check for IMPOSSIBLE CONFLICT on the TARGET student's record
-
-    // If setting A(Keep With) B, check B's record for "Separate From A"
     if (isSettingKeepWith && (targetStudent?.pinKeepApart || []).includes(selectedId)) {
       setBlockedMoveMessage(
-        `Cannot set "${selectedStudentName} Keep With ${targetStudentName}". ${targetStudentName} is already set to be SEPARATED FROM ${selectedStudentName}. Please remove the existing constraint on ${targetStudentName}'s record first.`
+        `Cannot set "${selectedStudentName} Keep With ${targetStudentName}". ${targetStudentName} is already set to be SEPARATED FROM ${selectedStudentName}.`
       );
       return;
     }
-
-    // If setting A(Separate From) B, check B's record for "Keep With A"
     if (!isSettingKeepWith && (targetStudent?.pinKeepWith || []).includes(selectedId)) {
       setBlockedMoveMessage(
-        `Cannot set "${selectedStudentName} Separate From ${targetStudentName}". ${targetStudentName} is already set to be KEPT WITH ${selectedStudentName}. Please remove the existing constraint on ${targetStudentName}'s record first.`
+        `Cannot set "${selectedStudentName} Separate From ${targetStudentName}". ${targetStudentName} is already set to be KEPT WITH ${selectedStudentName}.`
       );
       return;
     }
 
-
-    // 2. No conflict detected: ADD constraint and RECIPROCAL constraint
     const newArray = [...currentArray, targetId].filter(id => id !== selectedId);
-
     const reciprocalType = isSettingKeepWith ? 'pinKeepWith' : 'pinKeepApart';
     const targetArray = targetStudent?.[reciprocalType] || [];
     let newTargetArray = targetArray;
-
     if (!targetArray.includes(selectedId)) {
       newTargetArray = [...targetArray, selectedId];
     }
-
-    // Batch update both students
     batchPatchStudents([
       { id: selectedId, patch: { [type]: newArray } },
       { id: targetId, patch: { [reciprocalType]: newTargetArray } }
@@ -770,14 +643,13 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 
   const getButtonClass = (targetId, currentArray) => {
     const isActive = currentArray.includes(targetId);
-    return `px-2 py-1 text-xs rounded-full border transition duration-150 truncate ${
+    return `px-3 py-1.5 text-xs font-medium rounded-full border transition-all duration-200 truncate ${
       isActive
-      ? 'bg-blue-500 text-white border-blue-600'
-      : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+      ? 'bg-indigo-600 text-white border-indigo-600 shadow-md transform scale-105'
+      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-indigo-300'
     }`;
   };
 
-  // Get class name based on index
   const getClassName = (index) => {
     return classes[index]?.name || `Class ${index + 1}`;
   };
@@ -790,10 +662,10 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
   });
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-    <div className="lg:col-span-4">
-    <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Student Focus</div>
-    <select className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <div className="lg:col-span-4 bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border border-slate-100 dark:border-slate-800">
+    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Student Focus</div>
+    <select className="form-select block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
     value={selectedId||''}
     onChange={e=>setSelectedId(e.target.value||null)}>
     <option value="">(Select Student)</option>
@@ -801,15 +673,15 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
     </select>
 
     {s && (
-      <div className="mt-3">
-      <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Pin to Class</div>
-      <select className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
+      <div className="mt-4">
+      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Pin to Class</div>
+      <select className="block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
       value={s?.pinClass ?? ''}
       onChange={e=>{
         const v = e.target.value==='' ? null : Number(e.target.value)
         patchStudent(selectedId, { pinClass: v })
       }}>
-      <option value="">None</option>
+      <option value="">None (Auto-sort)</option>
       {Array.from({length:numClasses},(_,i)=>(
         <option key={i} value={i}>{getClassName(i)}</option>
       ))}
@@ -820,31 +692,28 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 
     {['pinKeepWith', 'pinKeepApart'].map((type) => {
       if (!s) return null;
-
       const currentArray = s?.[type] || [];
       const isKeepWith = type === 'pinKeepWith';
 
       return (
-        <div key={type} className="lg:col-span-4">
-        <div className="flex items-center justify-between">
-        <div className="text-xs font-semibold text-gray-600 dark:text-gray-300 mb-1">
+        <div key={type} className="lg:col-span-4 flex flex-col h-full">
+        <div className="flex items-center justify-between mb-2">
+        <div className={`text-sm font-bold ${isKeepWith ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
         {isKeepWith ? 'Keep With (Group)' : 'Separate From (Conflict)'}
         </div>
-        <button className="text-xs underline text-red-500" onClick={()=>batchPatchStudents([{id:selectedId, patch:{[type]:[]}}])}>Clear All</button>
+        <button className="text-xs font-medium text-slate-400 hover:text-rose-500 transition" onClick={()=>batchPatchStudents([{id:selectedId, patch:{[type]:[]}}])}>Clear All</button>
         </div>
 
-        {/* NEW: Search Input */}
         <input
         type="text"
         value={constraintSearch}
         onChange={(e) => setConstraintSearch(e.target.value)}
-        placeholder="Search student to add/remove..."
-        className="w-full p-2 border rounded-lg mb-3 bg-white dark:bg-gray-800 text-sm"
+        placeholder="Search to add/remove..."
+        className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg mb-3 bg-white dark:bg-slate-800 dark:text-white text-sm focus:ring-2 focus:ring-indigo-100 outline-none"
         />
 
-        <div className="border rounded-xl p-2 max-h-48 overflow-y-auto flex flex-wrap gap-2 bg-gray-50 dark:bg-gray-800">
-
-        {/* Display SELECTED students first */}
+        <div className="flex-1 border border-slate-200 dark:border-slate-700 rounded-xl p-3 max-h-64 overflow-y-auto flex flex-wrap content-start gap-2 bg-slate-50/50 dark:bg-slate-900/50">
+        {/* Selected */}
         {currentArray.map(id => {
           const studentName = studentsById.get(id)?.name;
           return (
@@ -852,14 +721,12 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
             key={id}
             onClick={() => togglePin(type, id)}
             className={getButtonClass(id, currentArray)}
-            title={`Remove constraint with ${studentName}`}
             >
-            ✔ {studentName}
+            <span className="mr-1">✓</span> {studentName}
             </button>
           );
         })}
-
-        {/* Display FILTERED, UNSELECTED students */}
+        {/* Unselected */}
         {filteredStudents
           .filter(id => !currentArray.includes(id))
           .map(id => {
@@ -869,15 +736,13 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
               key={id}
               onClick={() => togglePin(type, id)}
               className={getButtonClass(id, currentArray)}
-              title={`Add constraint with ${studentName}`}
               >
               + {studentName}
               </button>
             );
           })}
-
           {filteredStudents.length === 0 && constraintSearch && (
-            <p className="text-gray-500 text-xs p-2">No results for "{constraintSearch}"</p>
+            <p className="text-slate-400 text-xs p-2">No results</p>
           )}
           </div>
           </div>
@@ -888,16 +753,10 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 }
 
 /* ==========================================
- * PRINT SUMMARY COMPONENT
+ * PRINT SUMMARY COMPONENT (Preserved)
  * ========================================== */
 function PrintOverview({ classes, studentsById, criteria, cv }) {
-  // Simple check: do we have classes?
   if(!classes || !classes.length) return null
-
-    // Calculate global aggregate stats if desired, or just per-class
-    // We'll just do a clean matrix of classes.
-
-    // Filter active criteria for columns
     const activeCriteria = criteria.filter(c => (c.weight??0) > 0 && c.enabled);
 
   return (
@@ -925,16 +784,12 @@ function PrintOverview({ classes, studentsById, criteria, cv }) {
     {classes.map((c, i) => {
       const ids = c.studentIds;
       const relevantIds = ids.filter(id => !studentsById.get(id)?.ignoreScores);
-
-      // Gender
       let M=0, F=0;
       ids.forEach(id => {
         const g = studentsById.get(id)?.gender;
         if(g==='M') M++;
         else if(g==='F') F++;
       });
-
-        // Comp Score
         const sumComp = relevantIds.reduce((acc,id)=> acc + getCompositeScore(studentsById,id,criteria,cv), 0);
         const avgComp = relevantIds.length ? (sumComp/relevantIds.length).toFixed(1) : '-';
 
@@ -942,9 +797,7 @@ function PrintOverview({ classes, studentsById, criteria, cv }) {
           <tr key={c.id} className="even:bg-gray-50">
           <td className="border border-gray-300 p-2 font-semibold">{c.name || `Class ${i+1}`}</td>
           <td className="border border-gray-300 p-2 text-center">{ids.length}</td>
-          <td className="border border-gray-300 p-2 text-center text-xs">
-          {M}M / {F}F
-          </td>
+          <td className="border border-gray-300 p-2 text-center text-xs">{M}M / {F}F</td>
           <td className="border border-gray-300 p-2 text-right font-mono">{avgComp}</td>
           {activeCriteria.map(crit => {
             const sum = relevantIds.reduce((acc,id) => acc + (Number(studentsById.get(id)?.criteria?.[crit.label])||0), 0);
@@ -962,7 +815,7 @@ function PrintOverview({ classes, studentsById, criteria, cv }) {
 
 
 /* ==========================================
- * MAIN APP COMPONENT (state + top utilities)
+ * MAIN APP COMPONENT
  * ========================================== */
 export default function App(){
   const [dark, setDark] = useState(false)
@@ -970,32 +823,21 @@ export default function App(){
 
   const [studentsById, setStudentsById] = useState(new Map())
   const [allIds, setAllIds] = useState([])
-  // FIX: criteria is now empty by default
   const [criteria, setCriteria] = useState([])
   const [classMeta, setClassMeta] = useState([])
   const [classes, setClasses] = useState([])
   const [search, setSearch] = useState('')
-  const [sortMode, setSortMode] = useState('overallHigh') // Default sort mode updated
-  // FIX: Declared numClasses first
+  const [sortMode, setSortMode] = useState('overallHigh')
   const [numClasses, setNumClasses] = useState(6)
-
-  // add this with the other useState hooks in App()
   const [newCritName, setNewCritName] = useState('');
-
-  // NEW: State to track manual overrides and the confirmation modal
   const [hasManualChanges, setHasManualChanges] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
-  // NEW: State for blocked move notification
   const [blockedMoveMessage, setBlockedMoveMessage] = useState(null);
-
-
-  const [mode, setMode] = useState('balanced') // 'balanced' | 'leveled'
-  const [levelOn, setLevelOn] = useState('Reading') // or 'Composite'
-
-  // cached version keys
+  const [mode, setMode] = useState('balanced')
+  const [levelOn, setLevelOn] = useState('Reading')
   const criteriaVersion = useMemo(()=> makeCriteriaVersion(criteria), [criteria])
 
-  // drag + drop
+  // Drag and Drop
   const dragRef = useRef(null)
   function onDragStartStudent(e, sid, fromIdx){
     dragRef.current = { sid, fromIdx }
@@ -1012,7 +854,6 @@ export default function App(){
       for(const x of destIds){
         const xSep = new Set((studentsById.get(x)?.pinKeepApart||[]))
         if(sidSep.has(x) || xSep.has(sid)){
-          // FIX: Trigger MODAL for blocked move instead of a banner
           const blockingStudent = studentsById.get(x)?.name || 'another student';
           setBlockedMoveMessage(`Cannot move ${studentsById.get(sid)?.name} into this class. A separation constraint exists with ${blockingStudent}.`);
           dragRef.current = null;
@@ -1035,46 +876,33 @@ export default function App(){
       })
       setStudentsById(prev=>{
         const m = new Map(prev)
-        // CRITICAL ADDITION: Manually setting the student's pinClass when dragged
-        // This ensures the student stays in the new class if Auto Place is run again.
         const s = { ...m.get(sid), pinClass: toIdx }
         m.set(sid, s)
         return m
       })
       dragRef.current = null
-
-      // NEW: Mark that a manual change has occurred
-      setHasManualChanges(true); // FIX: Corrected variable name from 'setHasManual changes' to 'setHasManualChanges'
+      setHasManualChanges(true);
   }
 
-  // clear caches when inputs change
   useEffect(() => { scoreCache.clear(); metersCache.clear() }, [studentsById, criteria])
-  /* ---------- student ops ---------- */
+
   function updateStudent(id, patch){
     setStudentsById(prev => {
       const s = prev.get(id);
       const newStudent = { ...s, ...patch };
-
-      // Handle name change and split
       if (patch.firstName !== undefined || patch.lastName !== undefined || patch.name !== undefined) {
         let fn = patch.firstName !== undefined ? patch.firstName : (s.firstName || '');
         let ln = patch.lastName !== undefined ? patch.lastName : (s.lastName || '');
-
         if (patch.name !== undefined) {
-          // If updating full name, try to split it into first/last
           const parts = patch.name.trim().split(/\s+/);
           fn = parts.shift() || '';
           ln = parts.join(' ') || '';
         }
-
         newStudent.firstName = fn;
         newStudent.lastName = ln;
         newStudent.name = `${fn} ${ln}`.trim();
       }
-
-      // FIX: Explicitly set hasManualChanges to true if any student data is updated
       setHasManualChanges(true);
-
       const copy=new Map(prev);
       copy.set(id, newStudent);
       return copy;
@@ -1086,87 +914,60 @@ export default function App(){
     setClasses(prev=> prev.map(c=>({ ...c, studentIds: c.studentIds.filter(x=>x!==id) })))
   }
 
-  // ------- Add Student modal + single-student auto-place -------
-  const [lastAddMsg, setLastAddMsg] = useState('')
   const [lastAddedId, setLastAddedId] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [draftStudent, setDraftStudent] = useState(null)
-
-  // Custom state for general UI messages
   const [statusMessage, setStatusMessage] = useState({ message: '', type: 'success' });
 
-  // Function to display messages and clear them after a delay
   const displayStatus = (message, type = 'success', duration = 4000) => {
     setStatusMessage({ message, type });
     setTimeout(() => setStatusMessage({ message: '', type: 'success' }), duration);
   };
 
   function openAddStudent(){
-    // Use only active criteria (weight > 0)
     const activeCriteria = criteria.filter(c => (c.weight ?? 0) > 0);
     const crit = {}; activeCriteria.forEach(c=>{ crit[c.label]=0 })
     setDraftStudent({
-      firstName: '', // NEW
-      lastName: '', // NEW
-      name:'', id:'', gender:'', previousTeacher:'', notes:'', tags:'', criteria:crit
+      firstName: '', lastName: '', name:'', id:'', gender:'', previousTeacher:'', notes:'', tags:'', criteria:crit
     })
     setShowAdd(true)
   }
   function submitAddStudent(){
     if(!draftStudent) return
-
-      // FIX: Use first/last name fields
       let firstName = (draftStudent.firstName||'').trim();
     let lastName = (draftStudent.lastName||'').trim();
-
-    // Fallback if only 'name' was used in the modal (for simplicity)
     if (!firstName && !lastName) {
       const nameParts = (draftStudent.name || '').trim().split(/\s+/);
       firstName = nameParts.shift() || '';
       lastName = nameParts.join(' ') || '';
     }
-
     const fullName = `${firstName} ${lastName}`.trim();
-
     if(!fullName){
       displayStatus('Please enter a name for the student.', 'error');
       return
     }
-
-    // FIX: Simplified ID generation
     const baseRaw = `${firstName}${lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '');
     let newId = baseRaw;
     let n=1;
-    // Check for ID conflict against existing students (using names to generate ID)
     while(studentsById.has(newId) || newId === '') {
       newId = baseRaw + (++n);
     }
-
     const tags = (draftStudent.tags||'').split(/[|,;/]/).map(t=>t.trim()).filter(Boolean)
     const student = {
-      id:newId,
-      firstName: firstName, // NEW
-      lastName: lastName,   // NEW
-      name: fullName,       // NEW
+      id:newId, firstName, lastName, name: fullName,
       gender: draftStudent.gender || undefined,
       previousTeacher: draftStudent.previousTeacher || '',
       notes: draftStudent.notes || '',
       tags,
       criteria: { ...(draftStudent.criteria||{}) },
-      pinClass: null,
-      pinKeepWith: [],
-      pinKeepApart: []
+      pinClass: null, pinKeepWith: [], pinKeepApart: []
     }
-
-    // add to map, then decide class based on current classes
     setStudentsById(prev => {
       const m=new Map(prev); m.set(student.id, student)
-
       const cv = makeCriteriaVersion(criteria)
       const destIdx = (mode==='leveled')
       ? pickClassForNewStudentLeveled(student.id, classes, m, criteria, cv, levelOn)
       : pickClassForNewStudentBalanced(student.id, classes, m, criteria, cv)
-
       setClasses(prevC => {
         const copy = prevC.map(c => ({...c, studentIds:[...c.studentIds]}))
         if(copy[destIdx] && !copy[destIdx].studentIds.includes(student.id)){
@@ -1178,25 +979,12 @@ export default function App(){
         setTimeout(()=>setLastAddedId(null), 2000)
         return copy
       })
-
       return m
     })
     setAllIds(prev => [...prev, student.id])
-
     setShowAdd(false)
     setDraftStudent(null)
   }
-
-  // All state variables that runAutoPlace depends on
-  const runAutoPlaceDeps = [
-    studentsById,
-    allIds,
-    numClasses,
-    criteria,
-    mode,
-    levelOn,
-    classMeta,
-  ];
 
   function runAutoPlace(){
     const keepTogetherPairs = []
@@ -1212,19 +1000,15 @@ export default function App(){
       const out = autoPlace(studentsById, allIds, numClasses, opts)
       setClasses(out.classes)
     }
-    // NEW: Clear manual changes flag after a full algorithm run
     setHasManualChanges(false);
   }
 
-  // FIX: Run autoPlace ONLY when critical configuration/roster changes, NOT on manual class drag/drop
   useEffect(()=>{
-    // Only run if studentsById or criteria changes, or if classes are initially empty
     if (allIds.length > 0 && classes.length === 0) {
       runAutoPlace();
     }
   }, [studentsById, allIds.length, numClasses, criteria, mode, levelOn]);
 
-  // Function called when the user presses the main button
   const handleRunBalancingClick = () => {
     if (hasManualChanges) {
       setShowConfirmModal(true);
@@ -1232,65 +1016,40 @@ export default function App(){
       runAutoPlace();
     }
   };
-
   const handleConfirmRun = () => {
     setShowConfirmModal(false);
     runAutoPlace();
   };
 
   const getGenderClass = (gender) => {
-    // FIX: Adjusted class styling to force a square chip and center the text, resolving the 'F' oval issue.
-    // Use fixed w-4 h-4 with flex centering and remove unnecessary py-0.5 to control sizing.
-    if (gender === 'F') return 'bg-pink-100 text-pink-700 border-pink-300 px-1 text-[10px] w-4 h-4 flex items-center justify-center';
-    if (gender === 'M') return 'bg-blue-100 text-blue-700 border-blue-300 px-1 text-[10px] w-4 h-4 flex items-center justify-center';
-    return 'bg-gray-200 text-gray-600 border-gray-400 px-1 text-[10px] w-4 h-4 flex items-center justify-center';
+    const base = "text-[10px] w-5 h-5 flex items-center justify-center rounded-full shrink-0 font-bold border"
+    if (gender === 'F') return `${base} bg-pink-100 text-pink-700 border-pink-200`;
+    if (gender === 'M') return `${base} bg-blue-100 text-blue-700 border-blue-200`;
+    return `${base} bg-slate-100 text-slate-500 border-slate-200`;
   };
 
-
-  /* ---------- Toolbar field helper ---------- */
   function Field({ label, children }) {
     return (
-      <div className="flex flex-col gap-1 min-w-[140px]">
-      <div className="text-xs text-gray-600 dark:text-gray-300 whitespace-nowrap">{label}</div>
+      <div className="flex flex-col gap-1.5 min-w-[140px]">
+      <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{label}</div>
       {children}
       </div>
     );
   }
 
-  /* ---------- CSV/JSON I/O ---------- */
+  /* ---------- I/O (CSV/JSON) ---------- */
   function exportCSV(){
-    // 1. Map students to their assigned class name
     const studentClassMap = new Map();
-    classes.forEach(cls => {
-      cls.studentIds.forEach(id => {
-        studentClassMap.set(id, cls.name);
-      });
-    });
-
-    // 2. Define headers, EXCLUDING 'id'
-    const headers = ['Class Name', 'First Name','Last Name','gender','tags','notes','Previous Teacher', ...criteria.map(c=>c.label)] // ID and name removed
-
-    // 3. Populate rows
+    classes.forEach(cls => { cls.studentIds.forEach(id => { studentClassMap.set(id, cls.name); }); });
+    const headers = ['Class Name', 'First Name','Last Name','gender','tags','notes','Previous Teacher', ...criteria.map(c=>c.label)]
     const rows = allIds.map(id => {
       const s = studentsById.get(id)
       const className = studentClassMap.get(id) || 'Unassigned';
-
-    const base = [
-      className, // Class Name
-      s.firstName || '', // First Name
-      s.lastName || '', // Last Name
-      s.gender||'',
-      (s.tags||[]).join('; '),
-                            (s.notes||'').replaceAll('\n',' '),
-                            s.previousTeacher||''
-    ]
+    const base = [ className, s.firstName || '', s.lastName || '', s.gender||'', (s.tags||[]).join('; '), (s.notes||'').replaceAll('\n',' '), s.previousTeacher||'' ]
     const crit = criteria.map(c => Number(s.criteria?.[c.label]) || 0)
     return base.concat(crit)
     })
-
-    // 4. Sort rows by Class Name (the first column)
     rows.sort((a, b) => a[0].localeCompare(b[0]));
-
     const csv = [headers.join(','), ...rows.map(r=>r.join(','))].join('\n')
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
@@ -1298,300 +1057,221 @@ export default function App(){
   }
   async function importCSV(file){
     try {
-      const {students, criteriaLabels, maxScores} = safeParseCSV(await file.text()) // FIX: Await file.text()
-      if(!students.length) throw new Error('No rows detected. Make sure first row is headers and rows follow.')
-
+      const {students, criteriaLabels, maxScores} = safeParseCSV(await file.text())
+      if(!students.length) throw new Error('No rows detected.')
         let critMerged=[]
         criteriaLabels.forEach(label => {
-          // FIX: Use the calculated max score, and default weight to 1.0 (Normal)
           const max = maxScores[label] || 100;
           critMerged.push({ label, weight:1.0, max: max, enabled: true });
         })
-
-        const map=new Map();
-      const ids=[];
-
-      // Ensure all students have unique IDs if needed after import
+        const map=new Map(); const ids=[];
       students.forEach(st => {
         let currentId = st.id;
         let n = 1;
         const baseNameId = `${st.firstName}${st.lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '');
-
-        // Handle name conflicts by ensuring ID is truly unique after initial parse attempt
-        while(map.has(currentId)) {
-          currentId = baseNameId + (++n);
-        }
-
+        while(map.has(currentId)) { currentId = baseNameId + (++n); }
         const merged={...(st.criteria||{})}
         critMerged.forEach(c => { if(merged[c.label]===undefined || Number.isNaN(merged[c.label])) merged[c.label]=0 })
         const pinReady = { pinClass: st.pinClass ?? null, pinKeepWith: st.pinKeepWith ?? [], pinKeepApart: st.pinKeepApart ?? [] }
-        // FIX: Ensure new student objects are created with the ignoreScores default
         const cleanSt = { ...st, ignoreScores: st.ignoreScores ?? false }; delete cleanSt.enabled;
-
         map.set(currentId, {...cleanSt, ...pinReady, criteria:merged, id: currentId});
         ids.push(currentId);
       })
-
       setCriteria(critMerged); setStudentsById(map); setAllIds(ids); setClassMeta([])
       setClasses([]);
-      displayStatus(`Imported ${ids.length} students and ${criteriaLabels.length} balancing factors from "${file.name}".`, 'success');
-      setHasManualChanges(false); // Reset manual changes flag on fresh import
-
-    } catch (err) {
-      console.error('CSV import failed:', err);
-      // Replaced alert()
-      displayStatus('Load failed: '+(err?.message||err), 'error', 6000);
-    }
+      displayStatus(`Imported ${ids.length} students and ${criteriaLabels.length} factors.`, 'success');
+      setHasManualChanges(false);
+    } catch (err) { displayStatus('Load failed: '+(err?.message||err), 'error', 6000); }
   }
   function exportJSON(){
-    const payload = {
-      version: 'bcs-1',
-      numClasses,
-      criteria: criteria.map(({ enabled, ...rest }) => rest), // Strip 'enabled' flag on export
-      students: Array.from(studentsById.values()),
-      classMeta,
-      classes,
-    }
+    const payload = { version: 'bcs-1', numClasses, criteria: criteria.map(({ enabled, ...rest }) => rest), students: Array.from(studentsById.values()), classMeta, classes, }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url; a.download = 'bcs-session.json'; a.click(); URL.revokeObjectURL(url)
   }
   async function importJSON(file){
     try {
-      const text = await new Promise((resolve, reject) => {
-        const r = new FileReader()
-        r.onload = () => resolve(String(r.result||''))
-        r.onerror = () => reject(new Error('Could not read file'))
-        r.readAsText(file)
-      })
+      const text = await file.text()
       let data
       try{ data = JSON.parse(text) } catch(e){ throw new Error('Invalid JSON') }
-      if(!data || typeof data !== 'object') throw new Error('Invalid JSON structure')
-        if(!Array.isArray(data.students)) throw new Error('Missing "students" array')
-
-          const map = new Map()
-          const ids = []
-          for(const s of data.students){
-            if(!s || !s.id) continue
-
-              // Ensure student object has firstName and lastName
-              let fn = s.firstName || '';
-            let ln = s.lastName || '';
-            if (!fn && !ln && s.name) {
-              const parts = s.name.split(/\s+/);
-              fn = parts.shift() || '';
-              ln = parts.join(' ') || '';
-            }
-
-            // FIX: Ensure incoming students are created with the ignoreScores property
-            const newStudent = { pinClass:null, pinKeepWith:[], pinKeepApart:[], ignoreScores: false, ...s, firstName: fn, lastName: ln, name: `${fn} ${ln}`.trim() };
-            map.set(s.id, newStudent);
-            ids.push(s.id);
-          }
-          setStudentsById(map)
-          setAllIds(ids)
-          // Process criteria, ensuring 'enabled' is removed if present
-          if(Array.isArray(data.criteria)) {
-            const processedCriteria = data.criteria.map(c => {
-              if (c.enabled === undefined) c.enabled = (c.weight ?? 0) > 0; // Default to shown if weight > 0 or not defined
-              return c;
-            });
-            setCriteria(processedCriteria);
-          }
-          if(typeof data.numClasses === 'number' && data.numClasses > 0) setNumClasses(data.numClasses)
-            if(Array.isArray(data.classMeta)) setClassMeta(data.classMeta)
-              if(Array.isArray(data.classes)) setClasses(data.classes)
-                // Replaced alert()
-                displayStatus(`Loaded ${ids.length} students from JSON.`, 'success');
-      setHasManualChanges(false); // Reset manual changes flag on session load
-    } catch(err) {
-      console.error('JSON import failed:', err);
-      // Replaced alert()
-      displayStatus('Load failed: '+(err?.message||err), 'error', 6000);
-    }
+      if(!data || !Array.isArray(data.students)) throw new Error('Missing students')
+        const map = new Map(); const ids = []
+        for(const s of data.students){
+          if(!s || !s.id) continue
+            let fn = s.firstName || ''; let ln = s.lastName || '';
+          if (!fn && !ln && s.name) { const parts = s.name.split(/\s+/); fn = parts.shift() || ''; ln = parts.join(' ') || ''; }
+          const newStudent = { pinClass:null, pinKeepWith:[], pinKeepApart:[], ignoreScores: false, ...s, firstName: fn, lastName: ln, name: `${fn} ${ln}`.trim() };
+          map.set(s.id, newStudent); ids.push(s.id);
+        }
+        setStudentsById(map); setAllIds(ids)
+        if(Array.isArray(data.criteria)) {
+          const processedCriteria = data.criteria.map(c => {
+            if (c.enabled === undefined) c.enabled = (c.weight ?? 0) > 0;
+            return c;
+          });
+          setCriteria(processedCriteria);
+        }
+        if(data.numClasses > 0) setNumClasses(data.numClasses)
+          if(Array.isArray(data.classMeta)) setClassMeta(data.classMeta)
+            if(Array.isArray(data.classes)) setClasses(data.classes)
+              displayStatus(`Loaded ${ids.length} students from Session.`, 'success');
+      setHasManualChanges(false);
+    } catch(err) { displayStatus('Load failed: '+(err?.message||err), 'error', 6000); }
   }
 
-  // --- Weight Toggles and Mapping ---
   const handleWeightChange = (label, newWeightLabel) => {
     const newWeight = WEIGHT_MAP[newWeightLabel];
     if (newWeight === undefined) return;
-
-    setCriteria(prev => prev.map(c =>
-    c.label === label ? { ...c, weight: newWeight } : c
-    ));
+    setCriteria(prev => prev.map(c => c.label === label ? { ...c, weight: newWeight } : c));
     setHasManualChanges(true);
   };
-
-  const getWeightLabel = (weight) => {
-    return WEIGHT_MAP[weight] || 'Custom';
-  };
-
-  // --- Show/Hide Toggle ---
   const handleShowToggle = (label) => {
-    setCriteria(prev => prev.map(c =>
-    c.label === label ? { ...c, enabled: !c.enabled } : c
-    ));
-    // NOTE: Does not setHasManualChanges, as this only affects visualization, not the sorting algorithm itself (which uses weight > 0)
+    setCriteria(prev => prev.map(c => c.label === label ? { ...c, enabled: !c.enabled } : c));
   };
 
-  // --- Styles for Print ---
-  // FIX: Added style block for clean printing
+  // Styles
   const printStyles = `
   @media print {
-    @page { margin: 1cm; size: portrait; }
-    body { -webkit-print-color-adjust: exact; }
+    /* FORCE WHITE BACKGROUND / BLACK TEXT TO SAVE INK & FIX DARK MODE BUG */
+    :root, body, #root, .min-h-screen {
+      background-color: white !important;
+      color: black !important;
+    }
+    /* Explicitly override dark mode classes that might linger */
+    .dark\\:bg-slate-900, .dark\\:bg-slate-950, .dark\\:text-white, .dark\\:text-slate-200 {
+      background-color: white !important;
+      color: black !important;
+    }
+
+    @page { margin: 0.5cm; size: auto; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .no-print { display: none !important; }
     .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
     .print-reset-grid { display: block !important; }
-    .print-clean { box-shadow: none !important; border: none !important; margin: 0 !important; padding: 0 !important; }
-
-    /* Ensure clean white background and sharp text */
-    body, #root { background: white !important; color: black !important; }
-
-    /* Hide the pill-based card view in print, show table view */
+    .print-clean { box-shadow: none !important; border: none !important; margin: 0 !important; padding: 0 !important; background: transparent !important; }
     .screen-only-content { display: none !important; }
     .print-only-content { display: block !important; }
 
-    /* Table Styling for Print */
-    table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; }
+    /* FIX: Force table to respect column widths */
+    table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
+    th, td { border: 1px solid #ccc; padding: 2px 4px; text-align: left; vertical-align: top; word-wrap: break-word; overflow: hidden; }
     th { background-color: #f3f4f6 !important; font-weight: bold; }
-
-    /* Individual Roster Container */
-    .class-roster-container {
-      margin-top: 20px;
-      margin-bottom: 20px;
-    }
+    .class-roster-container { margin-top: 20px; margin-bottom: 20px; }
   }
-
-  /* Hide print content on screen */
   .print-only-content { display: none; }
   `;
 
-  /* ============================
-   * BEGIN RENDER (Toolbar first)
-   * ============================ */
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-800 dark:text-gray-200">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 font-sans selection:bg-indigo-100 selection:text-indigo-700 print:bg-white print:text-black">
     <style>{printStyles}</style>
 
-    {/* 1. Confirm Re-Balancing Modal */}
+    {/* CONFIRM MODAL */}
     <Modal
     open={showConfirmModal}
     onClose={() => setShowConfirmModal(false)}
     title="Confirm Re-Balancing"
     >
-    <div className="text-gray-700 dark:text-gray-300">
+    <div className="text-slate-600 dark:text-slate-300">
     <p className="mb-4">You have made manual changes to the class rosters since the last automated run.</p>
-    <p className="font-bold text-red-600">
-    Running the Class Balancing algorithm will overwrite and reset all manual drag-and-drop assignments.
+    <p className="font-bold text-rose-600">
+    Running the algorithm will overwrite all manual drag-and-drop assignments.
     </p>
-    <p className="mt-2">
-    Do you wish to proceed? (Manual pins set in the "Manual Pins & Relationships" section will be respected.)
+    <p className="mt-2 text-sm">
+    (Manual pins set in the "Manual Pins" section will be respected.)
     </p>
     </div>
     <div className="flex justify-end gap-3 mt-6">
     <button
     onClick={() => setShowConfirmModal(false)}
-    className="px-4 py-2 rounded border bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600"
+    className="px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
     >
     Cancel
     </button>
     <button
     onClick={handleConfirmRun}
-    className="px-4 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+    className="px-4 py-2 rounded-lg bg-rose-600 text-white hover:bg-rose-700 shadow-lg shadow-rose-500/30 transition"
     >
     Yes, Run and Overwrite
     </button>
     </div>
     </Modal>
 
-    {/* 4. Blocked Move Modal (Non-blocking replacement for displayStatus) */}
+    {/* BLOCKED MODAL */}
     <Modal
     open={!!blockedMoveMessage}
     onClose={() => setBlockedMoveMessage(null)}
     title="Constraint Violation"
     >
-    <div className="text-gray-700 dark:text-gray-300">
-    <p className="font-bold text-red-600 mb-4">Constraint Error</p>
+    <div className="text-slate-600 dark:text-slate-300">
+    <p className="font-bold text-rose-600 mb-4 flex items-center gap-2">
+    <span className="text-2xl">⚠️</span> Constraint Error
+    </p>
     <p>{blockedMoveMessage}</p>
-    <p className="mt-4">Please remove the conflicting constraint in the "Manual Pins & Relationships" section before proceeding.</p>
+    <p className="mt-4 text-sm bg-slate-100 dark:bg-slate-800 p-3 rounded-lg">Please remove the conflicting constraint in the "Manual Pins & Relationships" section before proceeding.</p>
     </div>
     <div className="flex justify-end mt-6">
     <button
     onClick={() => setBlockedMoveMessage(null)}
-    className="px-4 py-2 rounded bg-gray-600 text-white hover:bg-gray-700"
+    className="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-700"
     >
     Acknowledge
     </button>
     </div>
     </Modal>
 
-
-    {/* Toolbar */}
-    <div className="sticky top-0 z-10 bg-white/80 dark:bg-gray-900/80 backdrop-blur border-b no-print">
-    <div className="max-w-9xl mx-auto px-6 py-3 space-space-y-3">
-    {/* Row 1: Title + version | Theme + Print */}
+    {/* --- TOOLBAR --- */}
+    <div className="sticky top-0 z-30 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-sm no-print transition-all">
+    <div className="max-w-9xl mx-auto px-6 py-4 space-y-4">
+    {/* Top Row */}
+    <div className="flex items-center justify-between gap-4">
     <div className="flex items-center gap-3">
-    <div className="flex items-baseline gap-3">
-    <div className="text-2xl font-extrabold tracking-tight">
-    Class <span className="text-blue-600">Balancer</span>
+    <div className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white">
+    Class<span className="text-indigo-600 dark:text-indigo-400">Balancer</span>
     </div>
-    <span className="text-xs px-2 py-0.5 rounded-full border text-gray-600 dark:text-gray-300">
+    <span className="text-xs px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-500 font-mono">
     {VERSION}
     </span>
-    {/* FIX: Moved Dark Mode toggle right after version for cohesive display */}
-    <button onClick={()=>setDark(d=>!d)} className="px-2 py-1 border rounded text-sm ml-2">
+    <button onClick={()=>setDark(d=>!d)} className="p-2 hover:bg-slate-100 rounded-full transition text-slate-500">
     {dark ? '🌙' : '☀️'}
     </button>
     </div>
-    {/* START: Promoted Utility Bar */}
 
-    <div className="ml-auto flex flex-wrap items-center gap-2">
-
-    {/* Roster Import/Export (Left Group) */}
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
+    {/* File Ops */}
+    <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
     <button
     onClick={()=>document.getElementById('csvInput')?.click()}
-    className="px-3 py-2 rounded bg-purple-600 text-white text-sm hover:bg-purple-700 transition"
+    className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300"
     >
     Import Roster
     </button>
     <input id="csvInput" type="file" accept=".csv,text/csv" className="hidden" onChange={(e)=>{ const f=e.target.files?.[0]; if(!f) return; importCSV(f).finally(()=>{ e.target.value='' }) }}/>
-    <button onClick={exportCSV} className="px-3 py-2 rounded bg-indigo-600 text-white text-sm hover:bg-indigo-700 transition">
+
+    <button onClick={exportCSV} className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300">
     Export Roster
     </button>
-    </div>
-
-    <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-2" />
-
-    {/* Session Load/Save (Middle Group) */}
-    <div className="flex items-center gap-2">
+    <div className="w-px h-4 bg-slate-300 mx-1"></div>
     <button
     onClick={()=>document.getElementById('jsonInput')?.click()}
-    className="px-3 py-2 rounded bg-teal-700 text-white text-sm hover:bg-teal-800 transition"
+    className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300"
     >
     Load Session
     </button>
     <input id="jsonInput" type="file" accept="application/json,.json" className="hidden" onChange={(e)=>{ const f=e.target.files?.[0]; if(!f) return; importJSON(f).finally(()=>{ e.target.value='' }) }}/>
-    <button onClick={exportJSON} className="px-3 py-2 rounded bg-teal-500 text-white text-sm hover:bg-teal-600 transition">
+    <button onClick={exportJSON} className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300">
     Save Session
     </button>
     </div>
-
-    <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-2" />
-
-    {/* Print (Rightmost button) */}
-    <button onClick={()=>window.print()} className="px-3 py-2 rounded bg-slate-700 text-white text-sm">
+    <button onClick={()=>window.print()} className="ml-2 px-4 py-2 rounded-lg bg-slate-800 text-white text-sm font-medium hover:bg-slate-900 hover:shadow-lg transition">
     Print / PDF
     </button>
     </div>
-    {/* END: Promoted Utility Bar */}
     </div>
 
-    {/* Row 2: Core Configuration */}
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-gray-200 dark:border-gray-700 mt-3">
+    {/* Controls Row */}
+    <div className="flex flex-col lg:flex-row items-end lg:items-center gap-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 w-full lg:w-auto flex-1">
     <Field label="Classes">
     <input
     type="number"
@@ -1599,35 +1279,33 @@ export default function App(){
     max={20}
     value={numClasses}
     onChange={e=>setNumClasses(parseInt(e.target.value||'1',10))}
-    className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
+    className="border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium"
     />
     </Field>
 
     <Field label="Sort Lists By">
     <select
-    className="border rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 w-full"
+    className="border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium"
     value={sortMode}
     onChange={e=>setSortMode(e.target.value)}
     >
-    {/* FIX: Added Low to High sort option */}
-    <option value="overallHigh">Overall Score (High to Low)</option>
-    <option value="overallLow">Overall Score (Low to High)</option>
-    <option value="lastName">Last Name (A → Z)</option>
-    <option value="firstName">First Name (A → Z)</option>
+    <option value="overallHigh">High to Low</option>
+    <option value="overallLow">Low to High</option>
+    <option value="lastName">Last Name (A-Z)</option>
+    <option value="firstName">First Name (A-Z)</option>
     </select>
     </Field>
 
-    <Field label="Mode">
-    {/* FIX: Replaced Dropdown with Toggle Buttons */}
-    <div className="flex gap-2 w-full">
+    <Field label="Algorithm Mode">
+    <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg w-full">
     {['balanced', 'leveled'].map((m) => (
       <button
       key={m}
       onClick={() => setMode(m)}
-      className={`px-3 py-1 rounded text-sm font-semibold border transition duration-150 flex-grow capitalize ${
+      className={`flex-1 px-3 py-1.5 rounded-md text-sm font-bold capitalize transition-all ${
         mode === m
-        ? 'bg-blue-600 text-white border-blue-600'
-        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600'
+        ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-200 shadow-sm'
+        : 'text-slate-500 hover:text-slate-700'
       }`}
       >
       {m}
@@ -1636,734 +1314,409 @@ export default function App(){
     </div>
     </Field>
 
-    {/* FIX: Conditional display for Level on */}
     {mode === 'leveled' ? (
       <Field label="Level on">
       <select
-      className="border rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 w-full"
+      className="border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium"
       value={levelOn}
       onChange={e=>setLevelOn(e.target.value)}
       >
-      {/* FIX: Changed Composite to Overall Score */}
       <option value="Composite">Overall Score</option>
       {criteria.map(c => (
         <option key={c.label} value={c.label}>{c.label}</option>
       ))}
       </select>
       </Field>
-    ) : (
-      <div className="hidden lg:block" />
-    )}
+    ) : <div/>}
     </div>
 
-    {/* Row 3: Primary Action Button */}
-    <div className="mt-3">
+    {/* Action Button */}
     <button
     onClick={handleRunBalancingClick}
-    // FIX: Use a responsive max width to prevent it from being too wide
-    className={`px-3 py-2 rounded bg-blue-600 text-white text-lg font-bold shadow-xl hover:bg-blue-700 transition duration-200 w-full sm:w-auto ${hasManualChanges ? 'ring-2 ring-red-500' : ''}`}
-    >
-    Run Class Balancing
-    {hasManualChanges && (
-      <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-red-500 text-white animate-pulse">
-      ! Manual Edits
-      </span>
-    )}
-    </button>
-    </div>
-    </div>
-    </div>
-
-    {/* Status Banner (Replaces Alerts) */}
-    {statusMessage.message && (
-      <div className="max-w-9xl mx-auto px-6 mt-3 no-print">
-      <div className={`rounded-lg border px-3 py-2 text-sm
-        ${statusMessage.type === 'error' ? 'border-red-400 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300' :
-          statusMessage.type === 'success' ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300' :
-          'border-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300'}`}
-          >
-          {statusMessage.message}
-          </div>
-          </div>
-    )}
-
-    {/* Criteria */}
-    <div className="max-w-9xl mx-auto px-6 mt-4 no-print">
-    <div className="rounded-2xl border shadow-sm bg-white dark:bg-gray-900 p-3">
-    <div className="flex items-center justify-between">
-    <div className="font-semibold">Balancing Factors</div>
-    {/* REMOVED: Redundant explanatory text for Impact Multiplier */}
-    </div>
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
-    {criteria.map(c => (
-      <div key={c.label} className="border rounded-xl p-2 bg-white dark:bg-gray-900">
-      <div className="flex items-center justify-between mb-2">
-      <div className="font-medium truncate" title={c.label}>{c.label}</div>
-
-      {/* NEW: Show/Hide Toggle */}
-      <label className="text-xs flex items-center gap-1">
-      <input type="checkbox" checked={c.enabled} onChange={()=>handleShowToggle(c.label)} />
-      <span>Show Meter</span>
-      </label>
-
-      <button className="text-xs px-2 py-0.5 border rounded" onClick={()=>setCriteria(prev=>prev.filter(x=>x.label!==c.label))}>Remove</button>
-      </div>
-
-      <div className="grid grid-cols-[auto,1fr] items-center gap-x-2 gap-y-1">
-
-      {/* NEW: Weight Toggles (Low / Normal / High) */}
-      {/* FIX: Changed label to simply "Importance" */}
-      <div className="text-xs opacity-70">Importance</div>
-      <div className="flex justify-between gap-1 w-full"> {/* FIX: Added w-full to contain buttons */}
-      {['Low', 'Normal', 'High'].map(label => {
-        const value = WEIGHT_MAP[label];
-        const isActive = c.weight === value;
-        return (
-          <button
-          key={label}
-          // FIX: Adjusted flex and padding for better alignment
-          className={`px-2 py-1 text-xs rounded-lg border transition duration-100 text-center flex-grow flex items-center justify-center ${
-            isActive
-            ? 'bg-indigo-500 text-white border-indigo-600'
-            : 'bg-gray-200 dark:bg-gray-700'
-          }`}
-          onClick={() => handleWeightChange(c.label, label)}
-          >
-          {label}
-          </button>
-        );
-      })}
-      </div>
-
-      {/* FIX: Simplified Max Score Label */}
-      <div className="text-xs opacity-70">Max Score</div>
-      <input type="number" step={1} value={c.max}
-      onChange={e=>setCriteria(prev=>prev.map(x=>x.label===c.label?{...x,max:parseFloat(e.target.value||'100')}:x))}
-      className="border rounded px-2 py-1 bg-white dark:bg-gray-800 w-[110px]" />
+    className={`w-full lg:w-auto px-8 py-3 rounded-xl text-white text-sm font-bold tracking-wide shadow-lg shadow-indigo-500/30 hover:shadow-indigo-500/50 hover:scale-[1.02] active:scale-95 transition-all duration-200 ease-out
+      ${hasManualChanges
+        ? 'bg-gradient-to-r from-rose-500 to-orange-600 ring-2 ring-rose-200 animate-pulse'
+        : 'bg-gradient-to-r from-indigo-600 to-blue-600'
+      }`}
+      >
+      {hasManualChanges ? 'Run Re-Balance (!)' : 'Run Class Balancing'}
+      </button>
       </div>
       </div>
-    ))}
-    </div>
+      </div>
 
-    <div className="mt-3 flex gap-2 items-center">
-    <input
-    value={newCritName}
-    onChange={(e)=>setNewCritName(e.target.value)}
-    placeholder="New balancing factor name"
-    className="border rounded px-2 py-1 w-64 bg-white dark:bg-gray-800 text-sm"
-    />
-    <button
-    onClick={()=>{
-      const label = (newCritName||'').trim()
-      if(!label){
-        displayStatus('Enter a criterion name.', 'error');
-        return
-      }
-      if(criteria.some(c=>c.label===label)){
-        displayStatus('That name already exists.', 'error');
-        return
-      }
-      // New criterion defaults to weight 1 and max 100, and is shown by default
-      setCriteria(prev => [...prev, { label, weight:1.0, max:100, enabled: true }])
-      setStudentsById(prev => {
-        const c=new Map(prev)
-        c.forEach(v => { v.criteria = { ...(v.criteria||{}), [label]: 0 } })
-        return c
-      })
-      setNewCritName('')
-    }}
-    className="px-3 py-2 rounded bg-green-600 text-white text-sm"
-    >
-    Add Balancing Factor
-    </button>
-    </div>
-    </div>
-    </div>
-
-    {/* PRINT ONLY: Summary Table */}
-    <div className="max-w-9xl mx-auto px-6">
-    <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} cv={criteriaVersion} />
-    </div>
-
-    {/* Classes Grid */}
-    {/* FIX: Added print-reset-grid for printing */}
-    <div className="max-w-9xl mx-auto px-6 mt-4 grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4 class-grid print-reset-grid">
-    {(() => {
-      const cls = classes.map((c, idx)=> ({...c, name: classMeta[idx]?.name || c.name, studentIds:[...c.studentIds]}))
-      cls.forEach(c => {
-        if(sortMode==='overallHigh'){
-          c.studentIds.sort((a,b)=> getCompositeScore(studentsById,b,criteria,criteriaVersion) - getCompositeScore(studentsById,a,criteria,criteriaVersion))
-        } else if (sortMode === 'overallLow') {
-          // NEW SORT LOGIC: Overall Score Low to High
-          c.studentIds.sort((a,b)=> getCompositeScore(studentsById,a,criteria,criteriaVersion) - getCompositeScore(studentsById,b,criteria,criteriaVersion));
-        } else if (sortMode === 'lastName') { // Last Name A to Z
-          c.studentIds.sort((a, b) => (studentsById.get(a)?.lastName || '').localeCompare(studentsById.get(b)?.lastName || ''));
-        } else if (sortMode === 'firstName') { // First Name A to Z
-          c.studentIds.sort((a, b) => (studentsById.get(a)?.firstName || '').localeCompare(studentsById.get(b)?.firstName || ''));
-        } else { // Fallback to Full Name alphabetical
-          c.studentIds.sort((a,b)=> (studentsById.get(a)?.name||'').localeCompare(studentsById.get(b)?.name||''))
-        }
-      })
-
-      // CRITICAL: Need to pass allIds into calcMeters now to calculate global average
-      const currentAllIds = allIds;
-
-      return cls.map((c, idx) => {
-        const s = stats(studentsById, c.studentIds)
-        // UPDATED: Passing allIds to calcMeters
-        const meters = calcMeters(c, studentsById, criteria, currentAllIds, criteriaVersion)
-        return (
-          <div
-          key={c.id}
-          // FIX: Added print-specific classes: print-break-after, print-clean, print-full-width
-          className="rounded-2xl border shadow-sm bg-white dark:bg-gray-900 p-3 class-card print-break-after print-clean print-full-width"
-          >
-          <div className="flex items-center justify-between gap-2 min-w-0">
-          <input className="font-semibold bg-transparent border-b border-dashed focus:outline-none w-48 truncate"
-          value={classMeta[idx]?.name ?? c.name}
-          onChange={e=>{
-            const v=e.target.value
-            setClassMeta(prev=>{ const copy=[...prev]; copy[idx]={ ...(copy[idx]||{}), name:v }; return copy })
-            setClasses(prev=> prev.map((x,i)=> i===idx ? ({...x, name:v}) : x ))
-          }} />
-          </div>
-          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-          Size {s.size} · M {s.M} / F {s.F}
-          </div>
-
-          <div className="mt-2 space-y-1 no-print">
-          {meters.map(m => (
-            <div key={m.label} title={`Class Avg: ${m.avg.toFixed(2)} | Roster Avg: ${m.globalAvg.toFixed(2)}`}>
-            <div className="flex justify-between text-[10px] text-gray-500">
-            {/* FIX: Removed raw average score, keeping only percentage */}
-            <span>{m.label}</span><span>{Math.round(m.pct)}%</span>
-            </div>
-            <div className="h-2.5 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
-            {/* UPDATED: Using dynamic colorClass */}
-            <div className={`h-2.5 ${m.colorClass}`} style={{ width: m.pct+'%' }} />
-            </div>
-            <div className="text-[10px] text-gray-500 flex justify-end">
-            {m.labelText}
+      {/* STATUS TOAST */}
+      {statusMessage.message && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-5 fade-in duration-300 no-print">
+        <div className={`rounded-xl border px-4 py-3 shadow-xl font-medium flex items-center gap-3
+          ${statusMessage.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' :
+            statusMessage.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' :
+            'border-amber-200 bg-amber-50 text-amber-700'}`}
+            >
+            <span>{statusMessage.type === 'error' ? '✕' : '✓'}</span>
+            {statusMessage.message}
             </div>
             </div>
-          ))}
-          </div>
+      )}
 
-          {/* =======================================================
-            SCREEN VIEW (Card Pills)
-        ======================================================= */}
-        <ul
-        className="mt-3 space-y-2 min-h-[200px] screen-only-content"
-        onDragOver={(e)=>e.preventDefault()}
-        onDrop={(e)=>handleDrop(idx, e)}
-        >
-        {c.studentIds.map(id => {
-          const st = studentsById.get(id);
-          if (!st) return null
-            const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion)
-            // FIX: Using the first letter of the criterion label followed by a colon for cleaner display
-            // FIX: Re-added individual scores
-            const bits = criteria.filter(cc => (cc.weight ?? 0) > 0 && cc.enabled).map(cc => `${cc.label.charAt(0)}: ${st.criteria?.[cc.label] ?? 0}`)
-            return (
-              <li
-              key={id}
-              draggable
-              onDragStart={(e) => onDragStartStudent(e, id, idx)}
-              className={
-                "border rounded-xl px-2 py-1 bg-white dark:bg-gray-800 transition-shadow " +
-                (id === lastAddedId ? "ring-2 ring-emerald-500" : "")
-              }
-              >
-              <>
-              <div className="font-medium truncate flex items-center justify-between">
-              {/* FIX: Gender Chip AFTER Name, aligned right */}
-              <span className="truncate">
-              {st.name}
-              </span>
-              <span className={`text-[10px] font-bold px-1 py-0.5 rounded-full border ${getGenderClass(st.gender)} flex-shrink-0`}>
-              {st.gender?.charAt(0) || '?'}
-              </span>
-              </div>
+      {/* MAIN CONTENT AREA */}
+      <div className="max-w-9xl mx-auto px-6 py-8 space-y-8">
 
-              <div className="text-[11px] text-gray-600 dark:text-gray-300">
-              Overall: <span className="font-semibold">{Math.round(overall)}</span>
-              {/* FIX: Re-added individual scores here */}
-              {bits.length ? ' · ' + bits.join(' · ') : ''}
-              </div>
-
-              {st.previousTeacher ? (
-                <div className="text-[10px] text-gray-500 dark:text-gray-400">
-                Prev: {st.previousTeacher}
-                </div>
-              ) : null}
-
-              {st.notes ? (
-                <div
-                className="text-[10px] text-gray-500 dark:text-gray-400"
-                style={{
-                  overflow: 'hidden',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                  whiteSpace: 'normal'
-                }}
-                title={st.notes}
-                >
-                Notes: {st.notes}
-                </div>
-              ) : null}
-
-              {Array.isArray(st.tags) && st.tags.length > 0 ? (
-                <div className="mt-1 flex flex-wrap gap-1">
-                {st.tags.map(tag => (
-                  <span
-                  key={tag}
-                  className="text-[10px] px-1.5 py-0.5 border rounded-full bg-white dark:bg-gray-800"
-                  >
-                  {tag}
-                  </span>
-                ))}
-                </div>
-              ) : null}
-              </>
-              </li>
-            )
-        })}
-        </ul>
-
-        {/* =======================================================
-          PRINT VIEW (Clean Table)
-        ======================================================= */}
-        <div className="print-only-content class-roster-container">
-        {/* Header with Stats Inline */}
-        <div className="flex items-end justify-between border-b-2 border-gray-800 mb-2 pb-1">
-        <h2 className="text-xl font-bold text-black leading-none">{classMeta[idx]?.name ?? c.name}</h2>
-        <div className="text-xs font-mono text-gray-600 leading-none">
-        <span className="mr-3 font-bold text-black">Total: {c.studentIds.length}</span>
-        <span className="mr-2">Boys: {s.M}</span>
-        <span>Girls: {s.F}</span>
+      {/* CRITERIA PANEL */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
+      <div className="flex items-center justify-between mb-4">
+      <h2 className="text-lg font-bold text-slate-800 dark:text-white">Balancing Factors</h2>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      {criteria.map(c => (
+        <div key={c.label} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 bg-slate-50 dark:bg-slate-800/50 hover:border-indigo-300 transition-colors">
+        <div className="flex items-center justify-between mb-3">
+        <div className="font-bold text-slate-700 dark:text-slate-200 truncate pr-2" title={c.label}>{c.label}</div>
+        <div className="flex items-center gap-2">
+        <label className="text-[10px] flex items-center gap-1 text-slate-500 cursor-pointer select-none">
+        <input type="checkbox" checked={c.enabled} onChange={()=>handleShowToggle(c.label)} className="rounded text-indigo-600 focus:ring-indigo-500"/>
+        Show
+        </label>
+        <button className="text-slate-400 hover:text-rose-500 transition" onClick={()=>setCriteria(prev=>prev.filter(x=>x.label!==c.label))}>×</button>
         </div>
         </div>
 
-        <table className="w-full text-xs border-collapse">
-        <thead>
-        <tr className="border-b border-gray-400 text-left">
-        <th className="py-1 font-bold text-black w-[20%]">Student Name</th>
-        <th className="py-1 font-bold text-black w-[5%] text-center">Gen</th>
-        <th className="py-1 font-bold text-black w-[10%]">Tags</th>
-        <th className="py-1 font-bold text-black w-[5%] text-right">Score</th>
-        {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => (
-          <th key={crit.label} className="py-1 font-bold text-gray-600 text-right w-[5%] text-[10px] uppercase">
-          {crit.label.substring(0,3)}
-          </th>
-        ))}
-        <th className="py-1 font-bold text-black w-[15%] pl-2">Prev Teacher</th>
-        <th className="py-1 font-bold text-black w-auto pl-2">Notes</th>
-        </tr>
-        </thead>
-        <tbody>
-        {c.studentIds.map((id, rowIndex) => {
-          const st = studentsById.get(id);
-          if(!st) return null;
-          const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion);
-
+        <div className="space-y-2">
+        <div>
+        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Importance</div>
+        <div className="flex bg-white dark:bg-slate-700 rounded-lg p-0.5 border border-slate-200 dark:border-slate-600">
+        {['Low', 'Normal', 'High'].map(label => {
+          const isActive = c.weight === WEIGHT_MAP[label];
           return (
-            <tr key={id} className={`border-b border-gray-200 ${rowIndex % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
-            <td className="py-1 font-semibold text-black whitespace-nowrap overflow-hidden text-ellipsis">
-            {st.lastName}, {st.firstName}
-            </td>
-            <td className="py-1 text-center text-black font-mono">{st.gender}</td>
-            <td className="py-1 text-[10px] text-gray-600 leading-tight">
-            {(st.tags || []).join(', ')}
-            </td>
-            <td className="py-1 text-right font-mono text-black">{Math.round(overall)}</td>
-            {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => (
-              <td key={crit.label} className="py-1 text-right text-gray-500 font-mono text-[10px]">
-              {st.criteria?.[crit.label] ?? 0}
-              </td>
-            ))}
-            <td className="py-1 text-gray-700 text-[10px] pl-2 whitespace-nowrap overflow-hidden text-ellipsis">
-            {st.previousTeacher}
-            </td>
-            <td className="py-1 text-gray-700 text-[10px] pl-2 italic leading-tight">
-            {st.notes}
-            </td>
-            </tr>
+            <button
+            key={label}
+            className={`flex-1 py-1 text-[10px] font-bold rounded-md transition-all ${
+              isActive
+              ? 'bg-indigo-100 text-indigo-700 shadow-sm'
+              : 'text-slate-400 hover:text-slate-600'
+            }`}
+            onClick={() => handleWeightChange(c.label, label)}
+            >
+            {label}
+            </button>
           );
         })}
-        </tbody>
-        </table>
         </div>
-
         </div>
-        )
-      })
-    })()}
-    </div>
+        <div>
+        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Max Score</div>
+        <input type="number" value={c.max}
+        onChange={e=>setCriteria(prev=>prev.map(x=>x.label===c.label?{...x,max:parseFloat(e.target.value||'100')}:x))}
+        className="w-full text-xs font-mono border-slate-200 rounded px-2 py-1 bg-white dark:bg-slate-900 dark:text-white focus:border-indigo-500 outline-none" />
+        </div>
+        </div>
+        </div>
+      ))}
 
-    {/* Manual Pins & Relationships */}
-    <div className="max-w-9xl mx-auto px-6 mt-6 no-print">
-    <div className="rounded-2xl border shadow-sm bg-white dark:bg-gray-900 p-3">
-    <div className="text-sm font-semibold mb-2">Manual Pins & Relationships</div>
-    <ManualPins
-    allIds={allIds}
-    studentsById={studentsById}
-    numClasses={numClasses}
-    setStudentsById={setStudentsById}
-    classes={classes} // Passing classes for dynamic names
-    setBlockedMoveMessage={setBlockedMoveMessage} // Passing blocked move setter
-    />
-    </div>
-    </div>
+      {/* Add New */}
+      <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-3 flex flex-col justify-center gap-2 bg-slate-50/50 dark:bg-slate-800/50">
+      <input
+      value={newCritName}
+      onChange={(e)=>setNewCritName(e.target.value)}
+      placeholder="New factor name..."
+      className="border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-sm w-full bg-white dark:bg-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+      />
+      <button
+      onClick={()=>{
+        const label = (newCritName||'').trim()
+        if(!label || criteria.some(c=>c.label===label)) return
+          setCriteria(prev => [...prev, { label, weight:1.0, max:100, enabled: true }])
+          setStudentsById(prev => {
+            const c=new Map(prev)
+            c.forEach(v => { v.criteria = { ...(v.criteria||{}), [label]: 0 } })
+            return c
+          })
+          setNewCritName('')
+      }}
+      className="w-full py-1.5 rounded bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition"
+      >
+      + Add Factor
+      </button>
+      </div>
+      </div>
+      </div>
 
-    {/* Edit Students */}
-    <div className="max-w-9xl mx-auto px-6 mt-6 no-print">
-    <div className="rounded-2xl border shadow-sm bg-white dark:bg-gray-900 p-3">
-    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-    <div className="text-sm font-semibold">Edit Students</div>
-    <div className="flex items-center gap-2">
-    <input
-    placeholder="Search student name or tag..." // FIX: Updated placeholder
-    className="border rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 w-80"
-    value={search}
-    onChange={e=>setSearch(e.target.value)}
-    />
-    <button
-    onClick={openAddStudent}
-    className="px-3 py-1.5 rounded bg-emerald-600 text-white text-sm"
-    >
-    Add Student
-    </button>
-    </div>
-    </div>
+      {/* PRINT TABLE */}
+      <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} cv={criteriaVersion} />
 
-    <div className="overflow-auto pr-1" style={{ maxHeight: '500px' }}> {/* FIX: Restored max-height for scrolling */}
-    <div className="space-y-2">
-    {[...allIds]
-      .filter(id => (studentsById.get(id)?.name + id).toLowerCase().includes(search.toLowerCase()))
-      .sort((a,b)=> (studentsById.get(a)?.lastName||'').localeCompare(studentsById.get(b)?.lastName||''))
-      .map(id=>{
-        const s = studentsById.get(id)
-        return (
-          <div key={id} className="border rounded-lg p-2 text-sm bg-white dark:bg-gray-900">
-          <div className="flex items-center justify-between">
-          <div className="font-medium truncate">
-          {/* FIX: Removed ID from edit list name line */}
-          {s.name}
-          </div>
-          <button
-          className="text-xs px-2 py-0.5 border rounded text-red-600"
-          onClick={()=>deleteStudent(s.id)}
-          >
-          Delete
-          </button>
-          </div>
+      {/* CLASS GRID */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-6 print-reset-grid">
+      {(() => {
+        const cls = classes.map((c, idx)=> ({...c, name: classMeta[idx]?.name || c.name, studentIds:[...c.studentIds]}))
+        cls.forEach(c => {
+          if(sortMode==='overallHigh'){
+            c.studentIds.sort((a,b)=> getCompositeScore(studentsById,b,criteria,criteriaVersion) - getCompositeScore(studentsById,a,criteria,criteriaVersion))
+          } else if (sortMode === 'overallLow') {
+            c.studentIds.sort((a,b)=> getCompositeScore(studentsById,a,criteria,criteriaVersion) - getCompositeScore(studentsById,b,criteria,criteriaVersion));
+          } else if (sortMode === 'lastName') {
+            c.studentIds.sort((a, b) => (studentsById.get(a)?.lastName || '').localeCompare(studentsById.get(b)?.lastName || ''));
+          } else if (sortMode === 'firstName') {
+            c.studentIds.sort((a, b) => (studentsById.get(a)?.firstName || '').localeCompare(studentsById.get(b)?.firstName || ''));
+          }
+        })
+        const currentAllIds = allIds;
 
-          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2"> {/* FIX: Simplified responsive grid */}
-          {/* FIX: Added fields for First Name and Last Name for editing */}
-          <div className="col-span-1 flex flex-col">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-0.5">First Name</div>
-          <input
-          className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-          value={s.firstName || ''}
-          onChange={e=>updateStudent(s.id,{ firstName: e.target.value })}
-          />
-          </div>
-          <div className="col-span-1 flex flex-col">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-0.5">Last Name</div>
-          <input
-          className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-          value={s.lastName || ''}
-          onChange={e=>updateStudent(s.id,{ lastName: e.target.value })}
-          />
-          </div>
-
-          <div className="col-span-1 flex flex-col">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-0.5">Gender</div>
-          <select
-          className="border rounded px-1 py-1 w-full bg-white dark:bg-gray-800 text-sm"
-          value={s.gender || ''}
-          onChange={e=>updateStudent(s.id,{ gender:e.target.value||undefined })}
-          >
-          <option value="">—</option>
-          <option value="M">M</option>
-          <option value="F">F</option>
-          </select>
-          </div>
-          <div className="col-span-1 flex flex-col">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-0.5">Previous Teacher</div>
-          <input
-          className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-          value={s.previousTeacher||''}
-          onChange={e=>updateStudent(s.id,{ previousTeacher: e.target.value })}
-          />
-          </div>
-          </div>
-
-          {/* NEW: Ignore Scores Checkbox */}
-          <div className="mt-2 border-t pt-2">
-          <label className="flex items-center text-red-500 text-xs gap-2">
-          <input
-          type="checkbox"
-          checked={s.ignoreScores || false}
-          onChange={e => updateStudent(s.id, { ignoreScores: e.target.checked })}
-          className="w-4 h-4 text-red-600 bg-gray-100 border-red-300 rounded focus:ring-red-500"
-          />
-          Do Not Count Scores in Class Average (e.g., for Life Skills)
-          </label>
-          </div>
-
-          {/* Tags */}
-          <div className="mt-2">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Tags</div>
-          <div className="flex flex-wrap gap-2 mb-2">
-          {BUILTIN_TAGS.map(t => {
-            const active = (s.tags||[]).includes(t)
-            return (
-              <button
-              key={t}
-              type="button"
-              onClick={()=>{
-                const next = new Set(s.tags||[])
-                active ? next.delete(t) : next.add(t)
-                updateStudent(s.id, { tags: Array.from(next) })
-              }}
-              className={
-                "text-[11px] px-2 py-0.5 rounded-full border " +
-                (active ? "bg-blue-600 text-white border-blue-600" : "bg-white dark:bg-gray-800")
-              }
-              >
-              {t}
-              </button>
-            )
-          })}
-          </div>
-
-          <div className="flex gap-2 items-center">
-          <input
-          type="text"
-          placeholder="Add custom tag (e.g., Dyslexia)"
-          className="border rounded px-2 py-1 w-64 bg-white dark:bg-gray-800 text-sm"
-          onKeyDown={(e)=>{
-            if(e.key==='Enter'){
-              const val = e.currentTarget.value.trim()
-              if(!val) return
-                const next = new Set(s.tags||[])
-                next.add(val)
-                updateStudent(s.id, { tags: Array.from(next) })
-                e.currentTarget.value=''
-            }
-          }}
-          />
-          {/* NEW: Add Tag Button */}
-          <button
-          type="button"
-          onClick={(e) => {
-            const inputElement = e.currentTarget.previousSibling;
-            if (inputElement && inputElement.value.trim()) {
-              const val = inputElement.value.trim();
-              const next = new Set(s.tags || []);
-              next.add(val);
-              updateStudent(s.id, { tags: Array.from(next) });
-              inputElement.value = '';
-            }
-          }}
-          className="px-3 py-1.5 rounded bg-gray-300 text-gray-800 text-xs hover:bg-gray-400"
-          >
-          Add
-          </button>
-          </div>
-          </div>
-
-          {/* Criteria grid */}
-          <div className="mt-2">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Balancing Factors</div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-          {criteria.map(c => (
-            <label
-            key={c.label}
-            className="flex items-center justify-between gap-2 border rounded px-2 py-1"
+        return cls.map((c, idx) => {
+          const s = stats(studentsById, c.studentIds)
+          const meters = calcMeters(c, studentsById, criteria, currentAllIds, criteriaVersion)
+          return (
+            <div
+            key={c.id}
+            className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-clean print-full-width"
             >
-            <span className="truncate text-xs" title={c.label}>{c.label}</span>
+            {/* Header */}
+            <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800">
             <input
-            type="number"
-            className="border rounded px-2 py-1 w-16 min-w-[3.5rem] text-right bg-white dark:bg-gray-800"
-            value={(s.criteria?.[c.label] ?? '')}
-            onChange={e=>updateStudent(s.id,{
-              criteria:{ ...(s.criteria||{}), [c.label]: e.target.value }
-            })}
-            onBlur={e=>updateStudent(s.id,{
-              criteria:{ ...(s.criteria||{}), [c.label]: e.target.value === '' ? 0 : Number(e.target.value) }
-            })}
+            className="font-bold text-lg text-slate-800 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none w-full transition-colors"
+            value={classMeta[idx]?.name ?? c.name}
+            onChange={e=>{
+              const v=e.target.value
+              setClassMeta(prev=>{ const copy=[...prev]; copy[idx]={ ...(copy[idx]||{}), name:v }; return copy })
+              setClasses(prev=> prev.map((x,i)=> i===idx ? ({...x, name:v}) : x ))
+            }}
             />
-            </label>
+            <div className="flex items-center gap-3 mt-2 text-xs font-medium text-slate-500">
+            <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400 print:!bg-transparent print:!text-black print:!border print:!border-slate-300">Size: {s.size}</span>
+            {/* Updated M/F Indicators with Text Labels for Print Safety */}
+            <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-blue-400 print:bg-blue-400" style={{printColorAdjust: 'exact'}}></span>
+            <span className="text-slate-500 dark:text-slate-400 print:!text-black">M {s.M}</span>
+            </span>
+            <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-pink-400 print:bg-pink-400" style={{printColorAdjust: 'exact'}}></span>
+            <span className="text-slate-500 dark:text-slate-400 print:!text-black">F {s.F}</span>
+            </span>
+            </div>
+
+            {/* Meters */}
+            <div className="mt-4 space-y-2 no-print">
+            {meters.map(m => (
+              <div key={m.label} title={`Class Avg: ${m.avg.toFixed(2)}`}>
+              <div className="flex justify-between text-[10px] font-bold text-slate-400 mb-0.5 uppercase tracking-wide">
+              <span>{m.label}</span>
+              <span className={m.colorClass.replace('bg-','text-')}>{m.labelText}</span>
+              </div>
+              <div className="h-2.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden shadow-inner">
+              <div className={`h-full rounded-full transition-all duration-500 ease-out ${m.colorClass}`} style={{ width: m.pct+'%' }} />
+              </div>
+              </div>
+            ))}
+            </div>
+            </div>
+
+            {/* Body (Drop Zone) */}
+            <div className="p-3 flex-1 overflow-y-auto min-h-[300px]">
+            <ul
+            className="space-y-2 screen-only-content h-full"
+            onDragOver={(e)=>e.preventDefault()}
+            onDrop={(e)=>handleDrop(idx, e)}
+            >
+            {c.studentIds.map(id => {
+              const st = studentsById.get(id);
+              if (!st) return null
+                const overall = getCompositeScore(studentsById, id, criteria, criteriaVersion)
+                const bits = criteria.filter(cc => (cc.weight ?? 0) > 0 && cc.enabled).map(cc => `${cc.label.charAt(0)}:${st.criteria?.[cc.label] ?? 0}`)
+
+                return (
+                  <li
+                  key={id}
+                  draggable
+                  onDragStart={(e) => onDragStartStudent(e, id, idx)}
+                  className={
+                    "group relative p-3 rounded-xl border border-transparent bg-white dark:bg-slate-800 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 cursor-grab active:cursor-grabbing border-l-4 " +
+                    (st.gender === 'F' ? "border-l-pink-400 " : st.gender === 'M' ? "border-l-blue-400 " : "border-l-slate-300 ") +
+                    (id === lastAddedId ? "ring-2 ring-emerald-500 ring-offset-2" : "")
+                  }
+                  >
+                  <div className="flex items-start justify-between gap-2">
+                  <div>
+                  <div className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight">{st.name}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500 font-medium">
+                  <span className="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                  {Math.round(overall)}
+                  </span>
+                  <span className="opacity-80 text-[10px]">{bits.join(' · ')}</span>
+                  </div>
+                  </div>
+                  </div>
+
+                  {(st.notes || st.previousTeacher) && (
+                    <div className="mt-2 pt-2 border-t border-slate-50 dark:border-slate-700 space-y-0.5">
+                    {st.previousTeacher && <div className="text-[10px] text-slate-400">Prev: {st.previousTeacher}</div>}
+                    {st.notes && <div className="text-[10px] text-slate-400 italic line-clamp-2">{st.notes}</div>}
+                    </div>
+                  )}
+
+                  {Array.isArray(st.tags) && st.tags.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                    {st.tags.map(tag => (
+                      <span key={tag} className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-slate-100 bg-slate-50 text-slate-500 uppercase tracking-wide">
+                      {tag}
+                      </span>
+                    ))}
+                    </div>
+                  )}
+                  </li>
+                )
+            })}
+            </ul>
+
+            {/* Print View Table Logic (Hidden on screen) */}
+            <div className="print-only-content class-roster-container">
+            <table className="w-full text-xs border-collapse">
+            <thead>
+            <tr className="border-b border-gray-400 text-left">
+            {/* Adjusted Widths to fit data */}
+            <th className="py-1 w-[18%]">Name</th>
+            <th className="py-1 w-[5%] text-center">Gen</th>
+            <th className="py-1 w-[10%]">Tags</th>
+            <th className="py-1 w-[5%] text-right">Score</th>
+            {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => <th key={crit.label} className="py-1 w-[5%] text-right text-[9px]">{crit.label.substring(0,3)}</th>)}
+            <th className="py-1 w-[10%] pl-2">Prev Teacher</th>
+            <th className="py-1 w-auto pl-2">Notes</th>
+            </tr>
+            </thead>
+            <tbody>
+            {c.studentIds.map(id => {
+              const st = studentsById.get(id);
+              if(!st) return null;
+              return (
+                <tr key={id} className="border-b border-gray-100">
+                <td className="py-1 truncate">{st.lastName}, {st.firstName}</td>
+                <td className="py-1 text-center">{st.gender}</td>
+                <td className="py-1 text-[9px] text-gray-500 leading-tight">{(st.tags || []).join(', ')}</td>
+                <td className="py-1 text-right">{Math.round(getCompositeScore(studentsById, id, criteria, criteriaVersion))}</td>
+                {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => <td key={crit.label} className="py-1 text-right text-gray-500">{st.criteria?.[crit.label] ?? 0}</td>)}
+                <td className="py-1 text-gray-700 text-[9px] pl-2 truncate">{st.previousTeacher}</td>
+                <td className="py-1 text-gray-700 text-[9px] pl-2 italic leading-tight">{st.notes}</td>
+                </tr>
+              )
+            })}
+            </tbody>
+            </table>
+            </div>
+            </div>
+            </div>
+          )
+        })
+      })()}
+      </div>
+
+      {/* MANUAL PINS */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
+      <h2 className="text-lg font-bold text-slate-800 dark:text-white mb-4">Manual Pins & Relationships</h2>
+      <ManualPins allIds={allIds} studentsById={studentsById} numClasses={numClasses} setStudentsById={setStudentsById} classes={classes} setBlockedMoveMessage={setBlockedMoveMessage} />
+      </div>
+
+      {/* EDIT STUDENTS */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+      <h2 className="text-lg font-bold text-slate-800 dark:text-white">Student Roster</h2>
+      <div className="flex items-center gap-2">
+      <input
+      placeholder="Search roster..."
+      className="border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm bg-slate-50 dark:bg-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none w-64"
+      value={search}
+      onChange={e=>setSearch(e.target.value)}
+      />
+      <button onClick={openAddStudent} className="px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition shadow-lg shadow-emerald-500/20">
+      + New Student
+      </button>
+      </div>
+      </div>
+
+      <div className="overflow-y-auto max-h-[500px] pr-2 space-y-2">
+      {[...allIds]
+        .filter(id => (studentsById.get(id)?.name + id).toLowerCase().includes(search.toLowerCase()))
+        .sort((a,b)=> (studentsById.get(a)?.lastName||'').localeCompare(studentsById.get(b)?.lastName||''))
+        .map(id=>{
+          const s = studentsById.get(id)
+          return (
+            <div key={id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 text-sm bg-white dark:bg-slate-800 hover:border-indigo-300 transition">
+            <div className="flex items-center justify-between mb-3">
+            <div className="font-bold text-slate-800 dark:text-white text-base">{s.name}</div>
+            <button className="text-xs px-2 py-1 rounded border border-rose-200 text-rose-600 hover:bg-rose-50" onClick={()=>deleteStudent(s.id)}>Delete</button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+            <div className="space-y-1">
+            <div className="text-[10px] uppercase text-slate-400 font-bold">First Name</div>
+            <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.firstName || ''} onChange={e=>updateStudent(s.id,{ firstName: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+            <div className="text-[10px] uppercase text-slate-400 font-bold">Last Name</div>
+            <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.lastName || ''} onChange={e=>updateStudent(s.id,{ lastName: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+            <div className="text-[10px] uppercase text-slate-400 font-bold">Gender</div>
+            <select className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.gender || ''} onChange={e=>updateStudent(s.id,{ gender:e.target.value||undefined })}>
+            <option value="">—</option><option value="M">Male</option><option value="F">Female</option>
+            </select>
+            </div>
+            <div className="space-y-1">
+            <div className="text-[10px] uppercase text-slate-400 font-bold">Prev Teacher</div>
+            <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.previousTeacher||''} onChange={e=>updateStudent(s.id,{ previousTeacher: e.target.value })} />
+            </div>
+            </div>
+
+            <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3">
+            <div className="text-[10px] uppercase text-slate-400 font-bold mb-2">Scores</div>
+            {/* UPDATED: Changed from Grid to Flex Wrap for tighter packing */}
+            <div className="flex flex-wrap gap-3">
+            {criteria.map(c => (
+              <div key={c.label} className="flex flex-col">
+              <span className="text-[10px] text-slate-500 truncate max-w-[80px] text-center">{c.label}</span>
+              {/* UPDATED: Text Center and fixed width (w-20) to prevent stretching */}
+              <input type="number" className="w-20 border-slate-200 dark:border-slate-700 rounded px-2 py-1 text-center bg-white dark:bg-slate-800 dark:text-white focus:ring-1 focus:ring-indigo-500"
+              value={(s.criteria?.[c.label] ?? '')}
+              onChange={e=>updateStudent(s.id,{ criteria:{ ...(s.criteria||{}), [c.label]: e.target.value } })}
+              onBlur={e=>updateStudent(s.id,{ criteria:{ ...(s.criteria||{}), [c.label]: e.target.value === '' ? 0 : Number(e.target.value) } })}
+              />
+              </div>
+            ))}
+            </div>
+            </div>
+            </div>
+          )
+        })}
+        </div>
+        </div>
+        </div>
+
+        {/* ADD STUDENT MODAL */}
+        <Modal open={showAdd} onClose={()=>{ setShowAdd(false); setDraftStudent(null) }} title="Add New Student">
+        {draftStudent && (
+          <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+          <Field label="First Name"><input className="border-slate-300 dark:border-slate-600 rounded px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white" value={draftStudent.firstName} onChange={e=>setDraftStudent(ds=>({...ds, firstName:e.target.value}))} autoFocus /></Field>
+          <Field label="Last Name"><input className="border-slate-300 dark:border-slate-600 rounded px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white" value={draftStudent.lastName} onChange={e=>setDraftStudent(ds=>({...ds, lastName:e.target.value}))} /></Field>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+          <Field label="Gender">
+          <select className="border-slate-300 dark:border-slate-600 rounded px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white" value={draftStudent.gender} onChange={e=>setDraftStudent(ds=>({...ds, gender:e.target.value}))}>
+          <option value="">—</option><option value="M">M</option><option value="F">F</option>
+          </select>
+          </Field>
+          <Field label="Prev Teacher"><input className="border-slate-300 dark:border-slate-600 rounded px-3 py-2 w-full bg-white dark:bg-slate-800 dark:text-white" value={draftStudent.previousTeacher} onChange={e=>setDraftStudent(ds=>({...ds, previousTeacher:e.target.value}))} /></Field>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+          {criteria.map(c => (
+            <Field key={c.label} label={c.label}>
+            <input type="number" className="border-slate-300 dark:border-slate-600 rounded px-2 py-1 w-full text-right bg-white dark:bg-slate-800 dark:text-white" value={(draftStudent.criteria?.[c.label] ?? 0)} onChange={e=>setDraftStudent(ds=>({ ...ds, criteria: { ...(ds.criteria||{}), [c.label]: Number(e.target.value) } }))} />
+            </Field>
           ))}
           </div>
-          </div>
-
-          {/* Notes */}
-          <div className="mt-2">
-          <div className="text-xs text-gray-600 dark:text-gray-300 mb-0.5">Notes</div>
-          <input
-          type="text"
-          placeholder="Optional notes about the student"
-          className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-          value={s.notes||''}
-          onChange={e=>updateStudent(s.id,{ notes: e.target.value })}
-          />
+          <div className="flex justify-end pt-4">
+          <button className="px-6 py-2 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700" onClick={submitAddStudent}>Add Student</button>
           </div>
           </div>
-        )
-      })}
-      </div>
-      </div>
-      </div>
-      </div>
-
-      {/* Add Student Modal */}
-      <Modal
-      open={showAdd}
-      onClose={()=>{ setShowAdd(false); setDraftStudent(null) }}
-      title="Add Student"
-      >
-      {draftStudent && (
-        <div className="space-y-4">
-        {/* Basic info */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">First Name</div>
-        <input
-        className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-        value={draftStudent.firstName}
-        onChange={e=>setDraftStudent(ds=>({...ds, firstName:e.target.value}))}
-        placeholder="e.g., Ava"
-        autoFocus
-        />
+        )}
+        </Modal>
         </div>
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Last Name</div>
-        <input
-        className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-        value={draftStudent.lastName}
-        onChange={e=>setDraftStudent(ds=>({...ds, lastName:e.target.value}))}
-        placeholder="e.g., Taylor"
-        />
-        </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Gender</div>
-        <select
-        className="border rounded px-1 py-1 w-full bg-white dark:bg-gray-800 text-sm"
-        value={draftStudent.gender}
-        onChange={e=>setDraftStudent(ds=>({...ds, gender:e.target.value}))}
-        >
-        <option value="">—</option>
-        <option value="M">M</option>
-        <option value="F">F</option>
-        </select>
-        </div>
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Previous Teacher</div>
-        <input
-        className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-        value={draftStudent.previousTeacher}
-        onChange={e=>setDraftStudent(ds=>({...ds, previousTeacher:e.target.value}))}
-        placeholder="e.g., Ms. Lopez"
-        />
-        </div>
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Optional ID (auto if blank)</div>
-        {/* NOTE: Hidden from teacher, only used for generating internal ID if primary name fails */}
-        <input
-        className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-        value={draftStudent.id}
-        onChange={e=>setDraftStudent(ds=>({...ds, id:e.target.value}))}
-        placeholder="e.g., avatay01"
-        />
-        </div>
-        </div>
-
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Notes</div>
-        <input
-        type="text"
-        className="border rounded px-2 py-1 w-full bg-white dark:bg-gray-800"
-        value={draftStudent.notes}
-        onChange={e=>setDraftStudent(ds=>({...ds, notes:e.target.value}))}
-        placeholder="Optional"
-        />
-        </div>
-
-        {/* Criteria grid */}
-        <div>
-        <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Balancing Factors</div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-        {criteria.map(c => (
-          <label
-          key={c.label}
-          className="flex items-center justify-between gap-2 border rounded px-2 py-1"
-          >
-          <span className="truncate text-xs" title={c.label}>{c.label}</span>
-          <input
-          type="number"
-          className="border rounded px-2 py-1 w-16 min-w-[3.5rem] text-right bg-white dark:bg-gray-800"
-          value={(draftStudent.criteria?.[c.label] ?? 0)}
-          onChange={e=>{
-            const val = e.target.value
-            setDraftStudent(ds=>({
-              ...ds,
-              criteria: { ...(ds.criteria||{}), [c.label]: val }
-            }))
-          }}
-          onBlur={e=>{
-            const val = e.target.value
-            setDraftStudent(ds=>({
-              ...ds,
-              criteria: { ...(ds.criteria||{}), [c.label]: val==='' ? 0 : Number(val) }
-            }))
-          }}
-          />
-          </label>
-        ))}
-        </div>
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center justify-end gap-2 pt-2">
-        <button
-        className="px-3 py-2 rounded border"
-        onClick={()=>{ setShowAdd(false); setDraftStudent(null) }}
-        >
-        Cancel
-        </button>
-        <button
-        className="px-3 py-2 rounded bg-emerald-600 text-white"
-        onClick={submitAddStudent}
-        >
-        Add Student
-        </button>
-        </div>
-        </div>
-      )}
-      </Modal>
-
-      {/* Footer / version */}
-      <div className="max-w-9xl mx-auto px-6 mt-6 pb-10 text-xs text-gray-600 dark:text-gray-300 no-print">
-      <div className="flex items-center justify-between">
-      <div>
-      CSV headers: <code>First Name, Last Name, gender, tags, notes, Previous Teacher</code> + any numeric criteria
-      (e.g., <code>Reading,Math,Behavior</code>).
-      Tags in CSV may use <code>,</code>, <code>;</code>, <code>/</code>, or <code>|</code>.
-      </div>
-      <div className="shrink-0 ml-4">
-      <span className="px-2 py-0.5 rounded-full border text-gray-600 dark:text-gray-300">
-      {VERSION}
-      </span>
-      </div>
-      </div>
-      </div>
-      </div>
   )
 }
