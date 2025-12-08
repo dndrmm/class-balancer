@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.0.7'
+const VERSION = 'v2.0.8'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -49,11 +49,19 @@ function getCompositeScore(studentsById, id, criteria, cv){
       return 0;
     }
 
-    const val = criteria
-    .reduce((acc, c) => {
-      const v = Number(s.criteria?.[c.label]) || 0
-      const w = Number(c.weight) || 0
-      return acc + v * w
+    // NORMALIZATION FIX:
+    const val = criteria.reduce((acc, c) => {
+      const rawValue = Number(s.criteria?.[c.label]) || 0
+      const weight = Number(c.weight) || 0
+      // Prevent division by zero; default to 100 if max is missing/zero
+      const maxScore = c.max > 0 ? c.max : 100
+
+      // 1. Convert to percentage (0.0 to 1.0)
+      // 2. Multiply by 100 to get a nice whole number scale
+      // 3. Apply the Importance Weight
+      const normalizedScore = (rawValue / maxScore) * 100
+
+      return acc + (normalizedScore * weight)
     }, 0)
 
     scoreCache.set(key, val)
