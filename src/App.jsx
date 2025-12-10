@@ -1600,11 +1600,11 @@ export default function App(){
 
             {/* HIDE OVERALL SCORE IF ALL CRITERIA HIDDEN */}
             {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).length > 0 && (
-              <th className="py-1 w-[5%] text-right">Score</th>
+              <th className="py-1 w-[7%] text-right">Score</th>
             )}
 
             {criteria.filter(crit => (crit.weight??0) > 0 && crit.enabled).map(crit => <th key={crit.label} className="py-1 w-[5%] text-right text-[9px]">{crit.label.substring(0,3)}</th>)}
-            <th className="py-1 w-[10%] pl-2">Prev Teacher</th>
+            <th className="py-1 w-[10%] pl-2">Previous</th>
             <th className="py-1 w-auto pl-2">Notes</th>
             </tr>
             </thead>
