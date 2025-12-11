@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.0.8'
+const VERSION = 'v2.1.0'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -850,7 +850,8 @@ export default function App(){
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [blockedMoveMessage, setBlockedMoveMessage] = useState(null);
   const [mode, setMode] = useState('balanced')
-  const [levelOn, setLevelOn] = useState('Reading')
+  // UPDATED: Default to 'Composite' (Overall) instead of 'Reading' to prevent waterfall bug if data is missing
+  const [levelOn, setLevelOn] = useState('Composite')
   const criteriaVersion = useMemo(()=> makeCriteriaVersion(criteria), [criteria])
 
   // Drag and Drop
@@ -1095,6 +1096,10 @@ export default function App(){
       })
       setCriteria(critMerged); setStudentsById(map); setAllIds(ids); setClassMeta([])
       setClasses([]);
+
+      // FIX: Force Level On back to "Composite" to avoid missing criteria bug
+      setLevelOn('Composite');
+
       displayStatus(`Imported ${ids.length} students and ${criteriaLabels.length} factors.`, 'success');
       setHasManualChanges(false);
     } catch (err) { displayStatus('Load failed: '+(err?.message||err), 'error', 6000); }
@@ -1318,7 +1323,7 @@ export default function App(){
     </select>
     </Field>
 
-    <Field label="Algorithm Mode">
+    <Field label="Sorting Mode">
     <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg w-full">
     {['balanced', 'leveled'].map((m) => (
       <button
@@ -1521,6 +1526,7 @@ export default function App(){
               <div key={m.label} title={`Class Avg: ${m.avg.toFixed(2)}`}>
               <div className="flex justify-between text-[10px] font-bold text-slate-400 mb-0.5 uppercase tracking-wide">
               <span>{m.label}</span>
+              {/* This line dynamically sets the text color based on the bar color */}
               <span className={m.colorClass.replace('bg-','text-')}>{m.labelText}</span>
               </div>
               <div className="h-2.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden shadow-inner">
