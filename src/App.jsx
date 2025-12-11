@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.1.0'
+const VERSION = 'v2.1.2'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -77,6 +77,20 @@ function getAverageCriteriaScore(studentsById, allIds, criterionLabel) {
   return totalScore / relevantIds.length;
 }
 
+function getStandardDeviation(studentsById, allIds, criterionLabel, mean) {
+  const relevantIds = allIds.filter(id => !studentsById.get(id)?.ignoreScores);
+  if (relevantIds.length <= 1) return 0;
+
+  const sumSqDiff = relevantIds.reduce((acc, id) => {
+    const val = Number(studentsById.get(id)?.criteria?.[criterionLabel]) || 0;
+    const diff = val - mean;
+    return acc + (diff * diff);
+  }, 0);
+
+  // Using population standard deviation formula (div by N) as this is the complete dataset
+  return Math.sqrt(sumSqDiff / relevantIds.length);
+}
+
 function calcMeters(cls, studentsById, criteria, allIds, cv){
   const rosterSig = cls.studentIds.join(',')
   const key = `${cls.id}|${cv}|${rosterSig}`
@@ -98,28 +112,34 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
 
     const pct = Math.max(0, Math.min(100, (avg/(c.max||100))*100))
     const globalAvg = getAverageCriteriaScore(studentsById, allIds, c.label);
-    const deviation = avg - globalAvg;
-    const deviationPct = (deviation / (globalAvg || 1)) * 100;
+    const globalSD = getStandardDeviation(studentsById, allIds, c.label, globalAvg);
+
+    // Z-Score: How many standard deviations is this class away from the grade level mean?
+    const zScore = globalSD === 0 ? 0 : (avg - globalAvg) / globalSD;
 
     let colorClass = 'bg-emerald-500';
+    let textColorClass = 'text-emerald-500';
     let labelText = 'Balanced';
 
-  if (deviation < 0) {
-    if (deviationPct <= -15) {
-      colorClass = 'bg-rose-500';
-      labelText = 'Far Below Average';
-    } else if (deviationPct <= -10) {
-      colorClass = 'bg-amber-500';
-      labelText = 'Below Average';
-    }
-  } else if (deviation > 0) {
-    if (deviationPct >= 10) {
-      colorClass = 'bg-indigo-500';
-      labelText = 'Above Average';
-    }
+    // THRESHOLD LOGIC (Standard Deviations)
+    // +/- 0.5 SD is generally considered a "medium" effect size difference.
+    // > 0.5 SD means the class is noticeably different from the grade average.
+
+  if (zScore > 0.5) {
+    colorClass = 'bg-indigo-500';
+    textColorClass = 'text-indigo-500';
+    labelText = 'Above Avg';
+  } else if (zScore < -1.5) {
+    colorClass = 'bg-rose-500';
+    textColorClass = 'text-rose-500';
+    labelText = 'Far Below Avg';
+  } else if (zScore < -0.5) {
+    colorClass = 'bg-amber-500';
+    textColorClass = 'text-amber-500';
+    labelText = 'Below Avg';
   }
 
-  return { label:c.label, pct, colorClass, avg, globalAvg, labelText };
+  return { label:c.label, pct, colorClass, textColorClass, avg, globalAvg, labelText, zScore };
   })
   metersCache.set(key, meters); return meters
 }
@@ -347,6 +367,15 @@ function leveledPlace(studentsById, allIds, n, { criteria, levelOn, keepTogether
 
   const pinnedUnits = units.filter(u=>u.target!=null)
   const freeUnits   = units.filter(u=>u.target==null)
+
+  // FIX: Shuffle freeUnits before sorting.
+  // This prevents input-order bias (like gender grouping in the CSV) from causing
+  // blocks of single-gender classes when many students have tied scores (e.g. 1-3 scale).
+  for (let i = freeUnits.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [freeUnits[i], freeUnits[j]] = [freeUnits[j], freeUnits[i]];
+  }
+
   freeUnits.sort((a,b)=> unitScore(b.ids) - unitScore(a.ids))
 
   for(const unit of pinnedUnits){
@@ -1323,7 +1352,7 @@ export default function App(){
     </select>
     </Field>
 
-    <Field label="Sorting Mode">
+    <Field label="Algorithm Mode">
     <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg w-full">
     {['balanced', 'leveled'].map((m) => (
       <button
@@ -1527,7 +1556,7 @@ export default function App(){
               <div className="flex justify-between text-[10px] font-bold text-slate-400 mb-0.5 uppercase tracking-wide">
               <span>{m.label}</span>
               {/* This line dynamically sets the text color based on the bar color */}
-              <span className={m.colorClass.replace('bg-','text-')}>{m.labelText}</span>
+              <span className={m.textColorClass}>{m.labelText}</span>
               </div>
               <div className="h-2.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden shadow-inner">
               <div className={`h-full rounded-full transition-all duration-500 ease-out ${m.colorClass}`} style={{ width: m.pct+'%' }} />
