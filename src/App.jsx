@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.1.2'
+const VERSION = 'v2.1.17'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -122,14 +122,15 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
     let labelText = 'Balanced';
 
     // THRESHOLD LOGIC (Standard Deviations)
-    // +/- 0.5 SD is generally considered a "medium" effect size difference.
-    // > 0.5 SD means the class is noticeably different from the grade average.
+    // > 0.5 SD: Top ~31% (Above Average)
+    // < -0.5 SD: Bottom ~31% (Below Average)
+    // < -1.1 SD: Bottom ~14% (Far Below Average)
 
   if (zScore > 0.5) {
     colorClass = 'bg-indigo-500';
     textColorClass = 'text-indigo-500';
     labelText = 'Above Avg';
-  } else if (zScore < -1.5) {
+  } else if (zScore < -1.1) {
     colorClass = 'bg-rose-500';
     textColorClass = 'text-rose-500';
     labelText = 'Far Below Avg';
@@ -396,6 +397,8 @@ function leveledPlace(studentsById, allIds, n, { criteria, levelOn, keepTogether
   for(const unit of freeUnits){
     let placed = false;
     for (let i = currentClassIndex; i < n; i++) {
+      // NOTE: We ignore constraints (violatesApartUnit) here because we are in Leveled mode
+      // and runAutoPlace passes empty constraint arrays in this mode.
       if (fitsClass(unit, i) && !violatesApartUnit(unit, i)) {
         classes[i].studentIds.push(...unit.ids);
         currentClassIndex = i;
@@ -798,9 +801,15 @@ function PrintOverview({ classes, studentsById, criteria, cv }) {
 
   return (
     <div className="hidden print:block mb-8 break-after-page">
-    <div className="mb-6 border-b pb-4">
+    <div className="mb-6 border-b pb-4 flex justify-between items-end">
+    <div>
     <h1 className="text-3xl font-bold text-gray-900 mb-1">Class Placement Summary</h1>
     <p className="text-sm text-gray-500">Created with Class Balancer</p>
+    </div>
+    <div className="text-sm text-gray-900 font-medium space-y-2 text-right">
+    <div>Current Grade: __________________</div>
+    <div>Next Year Grade: __________________</div>
+    </div>
     </div>
 
     <table className="w-full text-sm border-collapse border border-gray-300">
@@ -852,6 +861,54 @@ function PrintOverview({ classes, studentsById, criteria, cv }) {
           </tr>
         )
     })}
+    </tbody>
+    </table>
+    </div>
+  )
+}
+
+/* ==========================================
+ * PRINT SEPARATIONS COMPONENT
+ * ========================================== */
+function PrintSeparations({ studentsById, allIds }) {
+  const separations = useMemo(() => {
+    return allIds
+    .map(id => studentsById.get(id))
+    .filter(s => s && s.pinKeepApart && s.pinKeepApart.length > 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .map(s => {
+      const targetNames = s.pinKeepApart
+      .map(tid => studentsById.get(tid)?.name)
+      .filter(Boolean)
+      .sort()
+      .join(', ');
+      return { name: s.name, targets: targetNames };
+    });
+  }, [studentsById, allIds]);
+
+  if (separations.length === 0) return null;
+
+  return (
+    <div className="hidden print:block pt-4">
+    <div className="mb-6 border-b pb-4">
+    <h1 className="text-3xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
+    <p className="text-sm text-gray-500">Confidential Reference</p>
+    </div>
+
+    <table className="w-full text-sm border-collapse border border-gray-300">
+    <thead>
+    <tr className="bg-gray-100 text-left">
+    <th className="border border-gray-300 p-2 font-bold text-gray-900 w-1/3">Student</th>
+    <th className="border border-gray-300 p-2 font-bold text-gray-900">Must Be Separated From</th>
+    </tr>
+    </thead>
+    <tbody>
+    {separations.map((row, i) => (
+      <tr key={i} className="even:bg-gray-50">
+      <td className="border border-gray-300 p-2 font-semibold">{row.name}</td>
+      <td className="border border-gray-300 p-2">{row.targets}</td>
+      </tr>
+    ))}
     </tbody>
     </table>
     </div>
@@ -1033,13 +1090,21 @@ export default function App(){
   }
 
   function runAutoPlace(){
+    // In leveled mode, we explicitly ignore constraints to ensure pure score-based sorting
+    const isLeveled = mode === 'leveled';
+
     const keepTogetherPairs = []
-    allIds.forEach(id => (studentsById.get(id)?.pinKeepWith||[]).forEach(o=>keepTogetherPairs.push([id,o])))
+    if (!isLeveled) {
+      allIds.forEach(id => (studentsById.get(id)?.pinKeepWith||[]).forEach(o=>keepTogetherPairs.push([id,o])))
+    }
+
     const keepApartPairs = []
-    allIds.forEach(id => (studentsById.get(id)?.pinKeepApart||[]).forEach(o=>keepApartPairs.push([id,o])))
+    if (!isLeveled) {
+      allIds.forEach(id => (studentsById.get(id)?.pinKeepApart||[]).forEach(o=>keepApartPairs.push([id,o])))
+    }
 
     const opts = { criteria, keepTogetherPairs, keepApartPairs, classMeta }
-    if (mode === 'leveled') {
+    if (isLeveled) {
       const out = leveledPlace(studentsById, allIds, numClasses, { ...opts, levelOn })
       setClasses(out.classes)
     } else {
@@ -1319,8 +1384,8 @@ export default function App(){
     Save Session
     </button>
     </div>
-    <button onClick={()=>window.print()} className="ml-2 px-4 py-2 rounded-lg bg-slate-800 text-white text-sm font-medium hover:bg-slate-900 hover:shadow-lg transition">
-    Print / PDF
+    <button onClick={()=>window.print()} className="ml-2 px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-bold hover:bg-slate-50 hover:text-slate-900 hover:shadow-md transition dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-700">
+    Print Report
     </button>
     </div>
     </div>
@@ -1352,7 +1417,7 @@ export default function App(){
     </select>
     </Field>
 
-    <Field label="Algorithm Mode">
+    <Field label="Sorting Mode">
     <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg w-full">
     {['balanced', 'leveled'].map((m) => (
       <button
@@ -1677,6 +1742,9 @@ export default function App(){
         })
       })()}
       </div>
+
+      {/* SEPARATIONS REPORT */}
+      <PrintSeparations studentsById={studentsById} allIds={allIds} />
 
       {/* MANUAL PINS */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
