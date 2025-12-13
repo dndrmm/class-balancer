@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.2'
+const VERSION = 'v2.2.1'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -130,7 +130,7 @@ function calcMeters(cls, studentsById, criteria, allIds, cv){
     colorClass = 'bg-indigo-500';
     textColorClass = 'text-indigo-500';
     labelText = 'Above Avg';
-  } else if (zScore < -1.1) {
+  } else if (zScore < -1.0) {
     colorClass = 'bg-rose-500';
     textColorClass = 'text-rose-500';
     labelText = 'Far Below Avg';
