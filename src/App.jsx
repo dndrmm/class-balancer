@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.2.2'
+const VERSION = 'v2.2.3'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -1869,3 +1869,4 @@ export default function App(){
         </div>
   )
 }
+
