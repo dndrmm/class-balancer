@@ -8,7 +8,7 @@ const metersCache = new Map()
 const CORE_FIELDS = new Set(['id','firstname','lastname','gender','tags','notes','previousteacher','previous_teacher', 'name'])
 const norm = (s)=> String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')
 
-const VERSION = 'v2.2.1'
+const VERSION = 'v2.2.2'
 const BUILTIN_TAGS = ['504','IEP','ELL','Gifted','Speech']
 
 const WEIGHT_MAP = {
@@ -535,12 +535,14 @@ function splitCSV(str){
   res.push(cur.trim())
   return res
 }
+
+// FIX: Updated mostlyNumeric to accept mapped letter grades as numeric
 function mostlyNumeric(vals){
   let num=0, tot=0
   for(const v of vals){
     if(!v) continue
       tot++
-      if(!isNaN(parseFloat(v))) num++
+      if(!isNaN(parseFloat(v)) || LETTER_GRADE_MAP.hasOwnProperty(v.toUpperCase())) num++
   }
   return tot>0 && (num/tot > 0.6)
 }
@@ -739,7 +741,7 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
         <div key={type} className="lg:col-span-4 flex flex-col h-full">
         <div className="flex items-center justify-between mb-2">
         <div className={`text-sm font-bold ${isKeepWith ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
-        {isKeepWith ? 'Keep With' : 'Separate From'}
+        {isKeepWith ? 'Keep With (Group)' : 'Separate From (Conflict)'}
         </div>
         <button className="text-xs font-medium text-slate-400 hover:text-rose-500 transition" onClick={()=>batchPatchStudents([{id:selectedId, patch:{[type]:[]}}])}>Clear All</button>
         </div>
@@ -1347,12 +1349,9 @@ export default function App(){
     {/* Top Row */}
     <div className="flex items-center justify-between gap-4">
     <div className="flex items-center gap-3">
-    <div className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white">
+    <div className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white cursor-help" title={`Version: ${VERSION}`}>
     Class<span className="text-indigo-600 dark:text-indigo-400">Balancer</span>
     </div>
-    <span className="text-xs px-2 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-500 font-mono">
-    {VERSION}
-    </span>
     <button onClick={()=>setDark(d=>!d)} className="p-2 hover:bg-slate-100 rounded-full transition text-slate-500">
     {dark ? '🌙' : '☀️'}
     </button>
