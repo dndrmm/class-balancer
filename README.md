@@ -1,6 +1,6 @@
 # Class Balancer
 
-![Version](https://img.shields.io/badge/version-2.0.6-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Status](https://img.shields.io/badge/status-stable-success.svg)
+![Version](https://img.shields.io/badge/version-2.2.3-blue.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg) ![Status](https://img.shields.io/badge/status-stable-success.svg)
 
 **Class Balancer** is a privacy-focused, browser-based tool designed to help educators create balanced class lists. It automates the complex process of sorting students by academic performance, gender, and behavioral needs while strictly adhering to "Keep Together" and "Separate From" constraints.
 
@@ -57,35 +57,6 @@ Click **Run Class Balancing**. The algorithm will sort students. You can then:
 * **Print / PDF:** Generate a physical copy.
 * **Save Session:** Download a `.json` file containing your roster and constraints to resume work later.
 * **Export Roster:** Download the final class lists as a CSV.
-
----
-
-## 💻 Local Development
-
-This project is built with **React** and **Tailwind CSS**.
-
-### Prerequisites
-* Node.js installed on your machine.
-
-### Installation
-
-1.  Clone the repository:
-    ```bash
-    git clone [https://github.com/yourusername/class-balancer.git](https://github.com/yourusername/class-balancer.git)
-    cd class-balancer
-    ```
-
-2.  Install dependencies:
-    ```bash
-    npm install
-    ```
-
-3.  Start the development server:
-    ```bash
-    npm run dev
-    ```
-
-4.  Open your browser to `http://localhost:5173` (or the port shown in your terminal).
 
 ---
 
