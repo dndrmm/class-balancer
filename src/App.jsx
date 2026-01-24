@@ -4,14 +4,12 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
  * CONFIGURATION & HELPERS
  * ========================================================================================= */
 
-const VERSION = 'v2.2.3' // Tag editing & UI cleanup
+const VERSION = 'v2.3.0'
 const BUILTIN_TAGS = ['504', 'IEP', 'ELL', 'Gifted', 'Speech']
 
-// Caches to speed up math calculations so the app doesn't freeze
 const scoreCache = new Map()
 const metersCache = new Map()
 
-// Helper: Standardize text (remove special chars, lowercase) for easier matching
 const normalizeString = (str) => {
   return String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '')
 }
@@ -25,7 +23,6 @@ const WEIGHT_MAP = {
   2.0: 'High'
 }
 
-// Generates a map of A=1, B=2... Z=26 for converting letter grades
 const LETTER_GRADE_MAP = (() => {
   const map = {}
   for (let i = 0; i < 26; i++) {
@@ -35,17 +32,24 @@ const LETTER_GRADE_MAP = (() => {
   return map
 })()
 
-// Helper: Create a unique string signature for the current criteria settings
-// This helps us know when to re-calculate scores.
 function makeCriteriaSignature(criteria) {
   return criteria.map(c => `${c.label}:${c.weight}:${c.max}:${c.enabled}`).join('|')
+}
+
+// FIX FOR BUG #2: Component defined outside App to prevent re-renders losing focus
+function Field({ label, children }) {
+  return (
+    <div className="flex flex-col gap-1.5 min-w-[140px]">
+    <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{label}</div>
+    {children}
+    </div>
+  )
 }
 
 /* =========================================================================================
  * MATH & SCORING LOGIC
  * ========================================================================================= */
 
-// Calculate a single student's "Composite Score" based on weighted criteria
 function getCompositeScore(studentsById, studentId, criteria, criteriaSig) {
   const cacheKey = studentId + '|' + criteriaSig
   const cached = scoreCache.get(cacheKey)
@@ -55,15 +59,15 @@ function getCompositeScore(studentsById, studentId, criteria, criteriaSig) {
 
     // Safety checks
     if (!student) { scoreCache.set(cacheKey, 0); return 0; }
+
+    // FIX FOR BUG #3: Students ignored from balancing return 0, but logic now handles them as neutral
     if (student.ignoreScores) { scoreCache.set(cacheKey, 0); return 0; }
 
-    // Calculate weighted sum
     const totalScore = criteria.reduce((acc, crit) => {
       const rawValue = Number(student.criteria?.[crit.label]) || 0
       const weight = Number(crit.weight) || 0
-      const maxScore = crit.max > 0 ? crit.max : 100 // Prevent division by zero
+      const maxScore = crit.max > 0 ? crit.max : 100
 
-      // Normalize to 0-100 scale
       const normalizedScore = (rawValue / maxScore) * 100
       return acc + (normalizedScore * weight)
     }, 0)
@@ -96,7 +100,6 @@ function getStandardDeviation(studentsById, allIds, criterionLabel, mean) {
     return Math.sqrt(sumSqDiff / activeIds.length)
 }
 
-// Calculate the stats (meters) for a specific class to see how balanced it is
 function calculateClassMeters(classData, studentsById, criteria, allIds, criteriaSig) {
   const rosterSig = classData.studentIds.join(',')
   const cacheKey = `${classData.id}|${criteriaSig}|${rosterSig}`
@@ -104,6 +107,7 @@ function calculateClassMeters(classData, studentsById, criteria, allIds, criteri
   const cached = metersCache.get(cacheKey)
   if (cached) return cached
 
+    // FIX FOR BUG #3: Filter out non-scored students so they don't drag down the class average
     const activeStudents = classData.studentIds.filter(id => !studentsById.get(id)?.ignoreScores)
     const studentCount = activeStudents.length
     const activeCriteria = criteria.filter(c => c.enabled)
@@ -118,15 +122,12 @@ function calculateClassMeters(classData, studentsById, criteria, allIds, criteri
         classAverage = totalScore / studentCount
       }
 
-      // Calculate Z-Score to determine color coding
       const globalAvg = getAverageCriteriaScore(studentsById, allIds, crit.label)
       const globalSD = getStandardDeviation(studentsById, allIds, crit.label, globalAvg)
       const zScore = globalSD === 0 ? 0 : (classAverage - globalAvg) / globalSD
 
-      // Percentage for the progress bar
       const barPercent = Math.max(0, Math.min(100, (classAverage / (crit.max || 100)) * 100))
 
-      // Determine Status Label & Color
       let colorClass = 'bg-emerald-500'
       let textColorClass = 'text-emerald-500'
       let labelText = 'Balanced'
@@ -173,14 +174,130 @@ function getGenderStats(studentsById, studentIds) {
 }
 
 /* =========================================================================================
+ * SUB-COMPONENTS
+ * ========================================================================================= */
+
+// FIX FOR BUG #1: Local state for tags to prevent cursor jumping/splitting issues
+function TagEditor({ student, onUpdate }) {
+  const [localVal, setLocalVal] = useState((student.tags || []).join(', '))
+
+  useEffect(() => {
+    setLocalVal((student.tags || []).join(', '))
+  }, [student.tags])
+
+  return (
+    <div className="mb-3">
+    <div className="text-[10px] uppercase text-slate-400 font-bold mb-1">Tags (Comma Separated)</div>
+    <input
+    className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 bg-slate-50 dark:bg-slate-900 dark:text-white text-xs"
+    placeholder="e.g. IEP, Math Support..."
+    value={localVal}
+    onChange={(e) => setLocalVal(e.target.value)}
+    onBlur={() => {
+      const tags = localVal.split(',').map(t => t.trim()).filter(Boolean)
+      onUpdate({ tags })
+    }}
+    onKeyDown={(e) => {
+      if (e.key === 'Enter') {
+        e.currentTarget.blur()
+      }
+    }}
+    />
+    </div>
+  )
+}
+
+function GradeLevelStats({ allIds, studentsById, criteria }) {
+  const stats = useMemo(() => {
+    const activeIds = allIds.filter(id => !studentsById.get(id)?.ignoreScores)
+    const totalCount = allIds.length
+    let males = 0, females = 0
+
+    allIds.forEach(id => {
+      const g = studentsById.get(id)?.gender
+      if (g === 'M') males++; else if (g === 'F') females++
+    })
+
+    const criteriaStats = criteria.filter(c => c.enabled).map(crit => {
+      const vals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
+      return {
+        label: crit.label,
+        avg: vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : 0,
+                                                              max: vals.length ? Math.max(...vals) : 0,
+                                                              min: vals.length ? Math.min(...vals) : 0
+      }
+    })
+
+    return { totalCount, males, females, criteriaStats, nonScored: totalCount - activeIds.length }
+  }, [allIds, studentsById, criteria])
+
+  return (
+    <div className="hidden print:block mb-8 border-2 border-slate-200 rounded-2xl p-6 bg-slate-50">
+    <h2 className="text-2xl font-bold text-slate-800 mb-4 border-b pb-2">Grade Level Statistics</h2>
+    <div className="grid grid-cols-4 gap-6 mb-6">
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Enrollment</div>
+    <div className="text-xl font-bold">{stats.totalCount} Students</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Gender</div>
+    <div className="text-xl font-bold">{stats.males}M / {stats.females}F</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Non-Scored</div>
+    <div className="text-xl font-bold text-amber-600">{stats.nonScored}</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Criteria Tracked</div>
+    <div className="text-xl font-bold">{stats.criteriaStats.length} Factors</div>
+    </div>
+    </div>
+    <table className="w-full text-sm border-collapse">
+    <thead>
+    <tr className="bg-white">
+    <th className="border p-2 text-left">Balancing Factor</th>
+    <th className="border p-2 text-right">Average Score</th>
+    <th className="border p-2 text-right">Low</th>
+    <th className="border p-2 text-right">High</th>
+    </tr>
+    </thead>
+    <tbody>
+    {stats.criteriaStats.map(s => (
+      <tr key={s.label}>
+      <td className="border p-2 font-semibold">{s.label}</td>
+      <td className="border p-2 text-right font-mono">{s.avg}</td>
+      <td className="border p-2 text-right font-mono">{s.min}</td>
+      <td className="border p-2 text-right font-mono">{s.max}</td>
+      </tr>
+    ))}
+    </tbody>
+    </table>
+    </div>
+  )
+}
+
+function Modal({ open, onClose, title, children }) {
+  if (!open) return null
+    return (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm transition-opacity" onClick={onClose}>
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-[min(700px,92vw)] max-h-[86vh] overflow-auto border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+      <div className="font-bold text-lg text-slate-800 dark:text-white">{title}</div>
+      <button className="text-sm px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 transition" onClick={onClose}>Close</button>
+      </div>
+      <div className="p-6">{children}</div>
+      </div>
+      </div>
+    )
+}
+
+/* =========================================================================================
  * BALANCING ALGORITHM
  * ========================================================================================= */
 
-// Disjoint-Set (Union-Find) Helper
-// Used to group students who must be kept together into single "Units"
 const findRoot = (parentMap, x) => {
   while (parentMap.get(x) !== x) {
-    parentMap.set(x, parentMap.get(parentMap.get(x))) // Path compression
+    parentMap.set(x, parentMap.get(parentMap.get(x)))
     x = parentMap.get(x)
   }
   return x
@@ -192,30 +309,22 @@ const unionNodes = (parentMap, a, b) => {
   if (rootA !== rootB) parentMap.set(rootA, rootB)
 }
 
-// Logic to pick the best class for a student group, prioritizing averages then gender balance
 function pickBestClassIndex(candidateIndexes, unitIds, classes, studentsById) {
-  // If only one option, take it
   if (candidateIndexes.length === 1) return candidateIndexes[0]
 
-    // Otherwise, break ties by looking at Gender Balance
     let bestIndex = candidateIndexes[0]
     let bestScore = Infinity
 
     for (const index of candidateIndexes) {
       const classRoster = classes[index].studentIds
-
-      // Count current gender in class
       let M = 0, F = 0
       for (const id of classRoster) {
         const g = studentsById.get(id)?.gender
         if (g === 'M') M++; else if (g === 'F') F++
       }
 
-      // Add incoming students' gender
       const incomingM = unitIds.filter(id => studentsById.get(id)?.gender === 'M').length
       const incomingF = unitIds.filter(id => studentsById.get(id)?.gender === 'F').length
-
-      // Calculate Imbalance Score (Lower is better)
       const imbalance = Math.abs((M + incomingM) - (F + incomingF))
 
       if (imbalance < bestScore) {
@@ -229,25 +338,21 @@ function pickBestClassIndex(candidateIndexes, unitIds, classes, studentsById) {
 function runAutoPlace(studentsById, allIds, numClasses, options) {
   const { criteria, keepTogetherPairs, keepApartPairs, classMeta } = options
 
-  // 1. Initialize empty classes
   const classes = Array.from({ length: numClasses }, (_, i) => ({
     id: `Class ${i + 1}`,
     name: classMeta?.[i]?.name || `Class ${i + 1}`,
     studentIds: []
   }))
 
-  // 2. Calculate capacity targets
   const baseTarget = Math.floor(allIds.length / numClasses)
   const remainder = allIds.length % numClasses
   const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0))
 
-  // 3. Group "Keep Together" students into Units using Union-Find
   const parentMap = new Map(allIds.map(id => [id, id]))
   keepTogetherPairs.forEach(([a, b]) => {
     if (a && b) unionNodes(parentMap, a, b)
   })
 
-  // Group IDs by their root parent
   const groups = new Map()
   allIds.forEach(id => {
     const root = findRoot(parentMap, id)
@@ -255,30 +360,28 @@ function runAutoPlace(studentsById, allIds, numClasses, options) {
       groups.get(root).push(id)
   })
 
-  // Convert groups to "Units" (some units are just 1 student, some are pairs/groups)
   const units = []
   for (const groupIds of groups.values()) {
-    // Check if any student in this group is manually pinned to a specific class
     const pins = groupIds.map(id => studentsById.get(id)?.pinClass).filter(p => p !== null && p !== undefined)
     const uniquePins = [...new Set(pins)]
 
     if (uniquePins.length > 0) {
-      // If pinned, the whole group goes to that class
       units.push({ ids: groupIds, targetClassIndex: uniquePins[0] })
     } else {
-      // Free floating unit
       units.push({ ids: groupIds, targetClassIndex: null })
     }
   }
 
-  // 4. Sort Units by "difficulty" (Average Score)
   const criteriaSig = makeCriteriaSignature(criteria)
-  const getUnitAvg = (ids) => ids.reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0) / ids.length
+  const getUnitAvg = (ids) => {
+    const scoredIds = ids.filter(id => !studentsById.get(id)?.ignoreScores)
+    if (scoredIds.length === 0) return 0
+      return scoredIds.reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0) / scoredIds.length
+  }
 
   const pinnedUnits = units.filter(u => u.targetClassIndex !== null)
-  const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => getUnitAvg(b.ids) - getUnitAvg(a.ids)) // High to Low
+  const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => getUnitAvg(b.ids) - getUnitAvg(a.ids))
 
-  // Helper: Check constraints
   const apartSet = new Set(keepApartPairs.map(([a, b]) => `${a}|${b}`))
 
   const violatesConstraints = (unitIds, classIndex) => {
@@ -293,56 +396,40 @@ function runAutoPlace(studentsById, allIds, numClasses, options) {
     return false
   }
 
-  // 5. Place Pinned Units First
   for (const unit of pinnedUnits) {
-    // If pinned class has a conflict, we try to force it but might technically break constraint.
-    // Ideally, we'd warn user. For now, we respect the pin.
     classes[unit.targetClassIndex].studentIds.push(...unit.ids)
   }
 
-  // 6. Place Free Units (The main algorithm)
   const getClassAvgAfterAdd = (classIndex, newIds) => {
     const currentIds = classes[classIndex].studentIds.filter(id => !studentsById.get(id)?.ignoreScores)
     const incomingIds = newIds.filter(id => !studentsById.get(id)?.ignoreScores)
 
-    const combinedTotal = [...currentIds, ...incomingIds].reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0)
-    return combinedTotal / (currentIds.length + incomingIds.length || 1)
+    if (currentIds.length + incomingIds.length === 0) return 0
+
+      const combinedTotal = [...currentIds, ...incomingIds].reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0)
+      return combinedTotal / (currentIds.length + incomingIds.length)
   }
 
   for (const unit of freeUnits) {
-    // Find valid classes (not full, no constraints)
-    // We look for classes with the MINIMUM current size first to keep sizes even
     const currentSizes = classes.map(c => c.studentIds.length)
     const minSize = Math.min(...currentSizes)
 
     let candidates = classes.map((c, i) => i)
-    .filter(i => currentSizes[i] === minSize) // Must be one of the smallest classes
-    .filter(i => classes[i].studentIds.length + unit.ids.length <= capacities[i]) // Must fit capacity
-    .filter(i => !violatesConstraints(unit.ids, i)) // Must not violate "Separate From"
+    .filter(i => currentSizes[i] === minSize)
+    .filter(i => classes[i].studentIds.length + unit.ids.length <= capacities[i])
+    .filter(i => !violatesConstraints(unit.ids, i))
 
-    // Fallback: If no min-size class works, try ANY class that fits
     if (candidates.length === 0) {
       candidates = classes.map((c, i) => i)
-      .sort((a, b) => currentSizes[a] - currentSizes[b]) // Sort by size asc
+      .sort((a, b) => currentSizes[a] - currentSizes[b])
       .filter(i => !violatesConstraints(unit.ids, i))
     }
 
-    // Decision time: Which candidate class needs this student's score the most?
-    let bestCandidates = []
-    let bestAvgDiff = Infinity
-
-    // We want the class average to stay close to the global average?
-    // Or just balance them against each other?
-    // Simple approach: Pick the class where adding this student results in the lowest variance.
-    // Current approach: Pick the class with the lowest average (waterfall filling).
-
-    // Use the Gender Balance tie-breaker on the valid candidates
     const chosenIndex = pickBestClassIndex(candidates, unit.ids, classes, studentsById)
 
     if (chosenIndex !== undefined) {
       classes[chosenIndex].studentIds.push(...unit.ids)
     } else {
-      // Desperation move: put in smallest class even if it violates constraints (rare)
       const smallestIndex = classes.map((c, i) => ({ i, len: c.studentIds.length })).sort((a, b) => a.len - b.len)[0].i
       classes[smallestIndex].studentIds.push(...unit.ids)
     }
@@ -364,7 +451,6 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
   const remainder = allIds.length % numClasses
   const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0))
 
-  // Group Keep Together
   const parentMap = new Map(allIds.map(id => [id, id]))
   keepTogetherPairs.forEach(([a, b]) => {
     if (a && b) unionNodes(parentMap, a, b)
@@ -389,27 +475,26 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
     if (levelOn === 'Composite') return getCompositeScore(studentsById, id, criteria, criteriaSig)
       return Number(studentsById.get(id)?.criteria?.[levelOn]) || 0
   }
-  const getUnitScore = (ids) => ids.reduce((sum, id) => sum + getScore(id), 0) / ids.length
+  const getUnitScore = (ids) => {
+    const scored = ids.filter(id => !studentsById.get(id)?.ignoreScores)
+    if (scored.length === 0) return 0
+      return scored.reduce((sum, id) => sum + getScore(id), 0) / scored.length
+  }
 
   const pinnedUnits = units.filter(u => u.targetClassIndex !== null)
   const freeUnits = units.filter(u => u.targetClassIndex === null)
 
-  // Shuffle free units to avoid input-order bias, then sort
   for (let i = freeUnits.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [freeUnits[i], freeUnits[j]] = [freeUnits[j], freeUnits[i]];
   }
-  freeUnits.sort((a, b) => getUnitScore(b.ids) - getUnitScore(a.ids)) // High to Low
+  freeUnits.sort((a, b) => getUnitScore(b.ids) - getUnitScore(a.ids))
 
-  // Place Pinned
   pinnedUnits.forEach(u => classes[u.targetClassIndex].studentIds.push(...u.ids))
 
-  // Place Free (Snake/Waterfall fill)
   let currentClassIndex = 0
   for (const unit of freeUnits) {
-    // Find next class with room
     let placed = false
-    // Try filling sequentially to create "levels"
     for (let i = currentClassIndex; i < numClasses; i++) {
       if (classes[i].studentIds.length + unit.ids.length <= capacities[i]) {
         classes[i].studentIds.push(...unit.ids)
@@ -419,13 +504,11 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
       }
     }
 
-    // If current level is full, just find any open spot
     if (!placed) {
       const openClass = classes.find(c => c.studentIds.length + unit.ids.length <= capacities[classes.indexOf(c)])
       if (openClass) openClass.studentIds.push(...unit.ids)
     }
 
-    // If current class full, move pointer
     if (classes[currentClassIndex].studentIds.length >= capacities[currentClassIndex] && currentClassIndex < numClasses - 1) {
       currentClassIndex++
     }
@@ -434,12 +517,10 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
   return { classes, capacities }
 }
 
-
 /* =========================================================================================
  * CSV & FILE PARSING
  * ========================================================================================= */
 
-// Standardize CSV splitting to handle quoted strings like "Doe, John"
 function parseCSVLine(str) {
   const result = []
   let currentVal = ''
@@ -450,7 +531,7 @@ function parseCSVLine(str) {
     if (insideQuotes) {
       if (char === '"') {
         if (i + 1 < str.length && str[i + 1] === '"') {
-          currentVal += '"' // Escaped quote
+          currentVal += '"'
           i++
         } else {
           insideQuotes = false
@@ -475,11 +556,9 @@ function parseCSVLine(str) {
 function detectNumericColumn(values) {
   let numCount = 0
   let totalCount = 0
-
   for (const v of values) {
     if (!v) continue
       totalCount++
-      // Check if it's a number OR a valid letter grade (A, B, C...)
       if (!isNaN(parseFloat(v)) || LETTER_GRADE_MAP.hasOwnProperty(String(v).toUpperCase())) {
         numCount++
       }
@@ -488,7 +567,7 @@ function detectNumericColumn(values) {
 }
 
 function processCSVFile(text) {
-  const raw = String(text || '').replace(/^\uFEFF/, '') // Remove BOM
+  const raw = String(text || '').replace(/^\uFEFF/, '')
   const lines = raw.split(/\r\n|\n|\r/).filter(l => l && l.trim().length > 0)
   if (!lines.length) return { students: [], criteriaLabels: [], maxScores: {} }
 
@@ -503,7 +582,6 @@ function processCSVFile(text) {
   const coreFieldsSet = new Set(['id', 'firstname', 'lastname', 'name', 'gender', 'tags', 'notes', 'previousteacher', 'previous_teacher'])
   const criteriaLabels = headersRaw.filter((h, i) => !coreFieldsSet.has(headersNorm[i]) && detectNumericColumn(columns[i] || []))
 
-  // Determine Max Scores
   const maxScores = {}
   const parsedCriteriaValues = new Map()
 
@@ -528,7 +606,6 @@ function processCSVFile(text) {
     parsedCriteriaValues.set(label, values)
   })
 
-  // Build Student Objects
   const students = []
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
@@ -537,7 +614,6 @@ function processCSVFile(text) {
 
     if (!rowMap['firstname'] && !rowMap['lastname'] && !rowMap['name']) continue
 
-      // Name Parsing
       let firstName = rowMap['firstname'] || ''
       let lastName = rowMap['lastname'] || ''
       if (!firstName && !lastName && hasSingleName && rowMap['name']) {
@@ -546,7 +622,6 @@ function processCSVFile(text) {
         lastName = parts.join(' ') || ''
       }
 
-      // ID Generation
       let id = rowMap['id']
       if (!id) {
         id = `${firstName}${lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '') || `row${i + 1}`
@@ -576,320 +651,19 @@ function processCSVFile(text) {
 
 
 /* =========================================================================================
- * SUB-COMPONENTS
- * ========================================================================================= */
-
-function Modal({ open, onClose, title, children }) {
-  if (!open) return null
-    return (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm transition-opacity" onClick={onClose}>
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-[min(700px,92vw)] max-h-[86vh] overflow-auto border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
-      <div className="font-bold text-lg text-slate-800 dark:text-white">{title}</div>
-      <button className="text-sm px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 transition" onClick={onClose}>Close</button>
-      </div>
-      <div className="p-6">{children}</div>
-      </div>
-      </div>
-    )
-}
-
-function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes, setBlockedMoveMessage }) {
-  const [selectedId, setSelectedId] = useState('')
-  const [constraintSearch, setConstraintSearch] = useState('')
-
-  useEffect(() => {
-    if (selectedId && !allIds.includes(selectedId)) setSelectedId('')
-  }, [allIds, selectedId])
-
-  const selectedStudent = selectedId ? studentsById.get(selectedId) : null
-
-  // Sort list alphabetically
-  const sortedIds = useMemo(() => [...allIds].sort((a, b) => (studentsById.get(a)?.name || '').localeCompare(studentsById.get(b)?.name || '')), [allIds, studentsById])
-
-  const batchUpdate = (updates) => {
-    setStudentsById(prev => {
-      const newMap = new Map(prev)
-      updates.forEach(({ id, patch }) => {
-        newMap.set(id, { ...newMap.get(id), ...patch })
-      })
-      return newMap
-    })
-  }
-
-  const togglePin = (type, targetId) => {
-    const targetStudent = studentsById.get(targetId)
-    const selectedName = selectedStudent?.name || selectedId
-    const targetName = targetStudent?.name || targetId
-
-    const isKeepWith = type === 'pinKeepWith'
-    const currentList = selectedStudent?.[type] || []
-    const isCurrentlySet = currentList.includes(targetId)
-
-    if (isCurrentlySet) {
-      // Toggle OFF
-      const newList = currentList.filter(id => id !== targetId)
-      const reciprocalType = isKeepWith ? 'pinKeepWith' : 'pinKeepApart'
-      const targetList = targetStudent?.[reciprocalType] || []
-      const newTargetList = targetList.filter(id => id !== selectedId)
-
-      batchUpdate([
-        { id: selectedId, patch: { [type]: newList } },
-        { id: targetId, patch: { [reciprocalType]: newTargetList } }
-      ])
-      return
-    }
-
-    // Check Conflicts before adding
-    if (isKeepWith && (targetStudent?.pinKeepApart || []).includes(selectedId)) {
-      setBlockedMoveMessage(`Conflict: ${selectedName} cannot be kept with ${targetName} because they are set to be separated.`)
-      return
-    }
-    if (!isKeepWith && (targetStudent?.pinKeepWith || []).includes(selectedId)) {
-      setBlockedMoveMessage(`Conflict: ${selectedName} cannot be separated from ${targetName} because they are set to be kept together.`)
-      return
-    }
-
-    // Toggle ON
-    const newList = [...currentList, targetId]
-    const reciprocalType = isKeepWith ? 'pinKeepWith' : 'pinKeepApart'
-    const targetList = targetStudent?.[reciprocalType] || []
-    const newTargetList = targetList.includes(selectedId) ? targetList : [...targetList, selectedId]
-
-    batchUpdate([
-      { id: selectedId, patch: { [type]: newList } },
-      { id: targetId, patch: { [reciprocalType]: newTargetList } }
-    ])
-  }
-
-  const getButtonClass = (targetId, currentArray) => {
-    const isActive = currentArray.includes(targetId)
-    return `px-3 py-1.5 text-xs font-medium rounded-full border transition-all duration-200 truncate ${
-      isActive
-      ? 'bg-indigo-600 text-white border-indigo-600 shadow-md transform scale-105'
-      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-indigo-300'
-    }`
-  }
-
-  const filteredTargets = sortedIds
-  .filter(id => id !== selectedId)
-  .filter(id => {
-    const name = studentsById.get(id)?.name || ''
-    return constraintSearch === '' || name.toLowerCase().includes(constraintSearch.toLowerCase())
-  })
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-    {/* Student Selector */}
-    <div className="lg:col-span-4 bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border border-slate-100 dark:border-slate-800">
-    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Student Focus</div>
-    <select
-    className="form-select block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
-    value={selectedId || ''}
-    onChange={e => setSelectedId(e.target.value || null)}
-    >
-    <option value="">(Select Student)</option>
-    {sortedIds.map(id => <option key={id} value={id}>{studentsById.get(id)?.name}</option>)}
-    </select>
-
-    {selectedStudent && (
-      <div className="mt-4">
-      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Pin to Class</div>
-      <select
-      className="block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
-      value={selectedStudent?.pinClass ?? ''}
-      onChange={e => {
-        const val = e.target.value === '' ? null : Number(e.target.value)
-        batchUpdate([{ id: selectedId, patch: { pinClass: val } }])
-      }}
-      >
-      <option value="">None (Auto-sort)</option>
-      {Array.from({ length: numClasses }, (_, i) => (
-        <option key={i} value={i}>{classes[i]?.name || `Class ${i + 1}`}</option>
-      ))}
-      </select>
-      </div>
-    )}
-    </div>
-
-    {/* Constraints Columns */}
-    {['pinKeepWith', 'pinKeepApart'].map((type) => {
-      if (!selectedStudent) return null
-        const currentList = selectedStudent?.[type] || []
-        const isKeepWith = type === 'pinKeepWith'
-
-        return (
-          <div key={type} className="lg:col-span-4 flex flex-col h-full">
-          <div className="flex items-center justify-between mb-2">
-          <div className={`text-sm font-bold ${isKeepWith ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
-          {isKeepWith ? 'Keep With' : 'Separate From'}
-          </div>
-          <button
-          className="text-xs font-medium text-slate-400 hover:text-rose-500 transition"
-          onClick={() => batchUpdate([{ id: selectedId, patch: { [type]: [] } }])}
-          >
-          Clear All
-          </button>
-          </div>
-
-          <input
-          type="text"
-          value={constraintSearch}
-          onChange={(e) => setConstraintSearch(e.target.value)}
-          placeholder="Search..."
-          className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg mb-3 bg-white dark:bg-slate-800 dark:text-white text-sm focus:ring-2 focus:ring-indigo-100 outline-none"
-          />
-
-          <div className="flex-1 border border-slate-200 dark:border-slate-700 rounded-xl p-3 max-h-64 overflow-y-auto flex flex-wrap content-start gap-2 bg-slate-50/50 dark:bg-slate-900/50">
-          {/* Selected Buttons */}
-          {currentList.map(id => (
-            <button key={id} onClick={() => togglePin(type, id)} className={getButtonClass(id, currentList)}>
-            <span className="mr-1">✓</span> {studentsById.get(id)?.name}
-            </button>
-          ))}
-
-          {/* Unselected Buttons */}
-          {filteredTargets.filter(id => !currentList.includes(id)).map(id => (
-            <button key={id} onClick={() => togglePin(type, id)} className={getButtonClass(id, currentList)}>
-            + {studentsById.get(id)?.name}
-            </button>
-          ))}
-
-          {filteredTargets.length === 0 && constraintSearch && <p className="text-slate-400 text-xs p-2">No results</p>}
-          </div>
-          </div>
-        )
-    })}
-    </div>
-  )
-}
-
-function PrintOverview({ classes, studentsById, criteria, criteriaSig }) {
-  if (!classes || !classes.length) return null
-    const activeCriteria = criteria.filter(c => (c.weight ?? 0) > 0 && c.enabled)
-
-    return (
-      <div className="hidden print:block mb-8 break-after-page">
-      <div className="mb-6 border-b pb-4 flex justify-between items-end">
-      <div>
-      <h1 className="text-3xl font-bold text-gray-900 mb-1">Class Placement Summary</h1>
-      <p className="text-sm text-gray-500">Created with Class Balancer</p>
-      </div>
-      <div className="text-sm text-gray-900 font-medium space-y-2 text-right">
-      <div>Current Grade: __________________</div>
-      <div>Next Year Grade: __________________</div>
-      </div>
-      </div>
-
-      <table className="w-full text-sm border-collapse border border-gray-300">
-      <thead>
-      <tr className="bg-gray-100 text-left">
-      <th className="border border-gray-300 p-2 font-bold text-gray-900">Class Name</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-16 text-center">Size</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-center">Gender</th>
-      {activeCriteria.length > 0 && (
-        <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-right">Avg Score</th>
-      )}
-      {activeCriteria.map(c => (
-        <th key={c.label} className="border border-gray-300 p-2 font-bold text-gray-900 text-right">{c.label} (Avg)</th>
-      ))}
-      </tr>
-      </thead>
-      <tbody>
-      {classes.map((c, i) => {
-        const ids = c.studentIds
-        const activeIds = ids.filter(id => !studentsById.get(id)?.ignoreScores)
-        const stats = getGenderStats(studentsById, ids)
-
-        const sumComp = activeIds.reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0)
-        const avgComp = activeIds.length ? (sumComp / activeIds.length).toFixed(1) : '-'
-
-        return (
-          <tr key={c.id} className="even:bg-gray-50">
-          <td className="border border-gray-300 p-2 font-semibold">{c.name || `Class ${i + 1}`}</td>
-          <td className="border border-gray-300 p-2 text-center">{ids.length}</td>
-          <td className="border border-gray-300 p-2 text-center text-xs">{stats.M}M / {stats.F}F</td>
-
-          {activeCriteria.length > 0 && (
-            <td className="border border-gray-300 p-2 text-right font-mono">{avgComp}</td>
-          )}
-
-          {activeCriteria.map(crit => {
-            const sum = activeIds.reduce((acc, id) => acc + (Number(studentsById.get(id)?.criteria?.[crit.label]) || 0), 0)
-            const avg = activeIds.length ? (sum / activeIds.length).toFixed(1) : '-'
-          return <td key={crit.label} className="border border-gray-300 p-2 text-right font-mono text-gray-600">{avg}</td>
-          })}
-          </tr>
-        )
-      })}
-      </tbody>
-      </table>
-      </div>
-    )
-}
-
-function PrintSeparations({ studentsById, allIds }) {
-  const separations = useMemo(() => {
-    return allIds
-    .map(id => studentsById.get(id))
-    .filter(s => s && s.pinKeepApart && s.pinKeepApart.length > 0)
-    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-    .map(s => {
-      const targetNames = s.pinKeepApart
-      .map(tid => studentsById.get(tid)?.name)
-      .filter(Boolean)
-      .sort()
-      .join(', ')
-      return { name: s.name, targets: targetNames }
-    })
-  }, [studentsById, allIds])
-
-  if (separations.length === 0) return null
-
-    return (
-      <div className="hidden print:block pt-4">
-      <div className="mb-6 border-b pb-4">
-      <h1 className="text-3xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
-      <p className="text-sm text-gray-500">Confidential Reference</p>
-      </div>
-      <table className="w-full text-sm border-collapse border border-gray-300">
-      <thead>
-      <tr className="bg-gray-100 text-left">
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-1/3">Student</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900">Must Be Separated From</th>
-      </tr>
-      </thead>
-      <tbody>
-      {separations.map((row, i) => (
-        <tr key={i} className="even:bg-gray-50">
-        <td className="border border-gray-300 p-2 font-semibold">{row.name}</td>
-        <td className="border border-gray-300 p-2">{row.targets}</td>
-        </tr>
-      ))}
-      </tbody>
-      </table>
-      </div>
-    )
-}
-
-
-/* =========================================================================================
  * MAIN APPLICATION
  * ========================================================================================= */
 
 export default function App() {
-  // Theme State
   const [dark, setDark] = useState(false)
   useEffect(() => { document.documentElement.classList.toggle('dark', dark) }, [dark])
 
-  // Core Data State
   const [studentsById, setStudentsById] = useState(new Map())
   const [allIds, setAllIds] = useState([])
   const [criteria, setCriteria] = useState([])
   const [classMeta, setClassMeta] = useState([])
   const [classes, setClasses] = useState([])
 
-  // UI State
   const [search, setSearch] = useState('')
   const [sortMode, setSortMode] = useState('overallHigh')
   const [numClasses, setNumClasses] = useState(6)
@@ -898,14 +672,11 @@ export default function App() {
   const [showConfirmModal, setShowConfirmModal] = useState(false)
   const [blockedMoveMessage, setBlockedMoveMessage] = useState(null)
 
-  // Advanced Settings
   const [mode, setMode] = useState('balanced')
   const [levelOn, setLevelOn] = useState('Composite')
 
-  // Computed State
   const criteriaSig = useMemo(() => makeCriteriaSignature(criteria), [criteria])
 
-  // ---- Drag & Drop Logic ----
   const dragRef = useRef(null)
 
   const onDragStartStudent = (e, sid, fromIdx) => {
@@ -922,7 +693,6 @@ export default function App() {
       const student = studentsById.get(sid)
       const destClassIds = classes[toIdx]?.studentIds || []
 
-      // Check Conflicts in destination class
       const studentConflicts = new Set(student?.pinKeepApart || [])
 
       for (const existingId of destClassIds) {
@@ -937,7 +707,6 @@ export default function App() {
         }
       }
 
-      // Perform the Move
       setClasses(prev => {
         const copy = prev.map(c => ({ ...c, studentIds: [...c.studentIds] }))
         const src = copy[info.fromIdx]
@@ -953,7 +722,6 @@ export default function App() {
         return copy
       })
 
-      // Update Student Pin
       setStudentsById(prev => {
         const m = new Map(prev)
         m.set(sid, { ...m.get(sid), pinClass: toIdx })
@@ -964,16 +732,13 @@ export default function App() {
       setHasManualChanges(true)
   }
 
-  // Clear caches when data changes
   useEffect(() => { scoreCache.clear(); metersCache.clear() }, [studentsById, criteria])
 
-  // ---- CRUD Operations ----
   const updateStudent = (id, patch) => {
     setStudentsById(prev => {
       const s = prev.get(id)
       const newStudent = { ...s, ...patch }
 
-      // Auto-update full name if parts change
       if (patch.firstName !== undefined || patch.lastName !== undefined || patch.name !== undefined) {
         let fn = patch.firstName !== undefined ? patch.firstName : (s.firstName || '')
         let ln = patch.lastName !== undefined ? patch.lastName : (s.lastName || '')
@@ -1000,7 +765,6 @@ export default function App() {
     setClasses(prev => prev.map(c => ({ ...c, studentIds: c.studentIds.filter(x => x !== id) })))
   }
 
-  // ---- Adding New Students ----
   const [lastAddedId, setLastAddedId] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [draftStudent, setDraftStudent] = useState(null)
@@ -1033,7 +797,6 @@ export default function App() {
       const fullName = `${firstName} ${lastName}`.trim()
       if (!fullName) { displayStatus('Please enter a name.', 'error'); return }
 
-      // Generate ID
       const baseId = `${firstName}${lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '')
       let newId = baseId
       let n = 1
@@ -1059,12 +822,8 @@ export default function App() {
         const m = new Map(prev)
         m.set(student.id, student)
 
-        // Auto-place the new student immediately
-        // We do a "mini-run" just to find a spot for this one person
         setClasses(prevClasses => {
           const copy = prevClasses.map(c => ({ ...c, studentIds: [...c.studentIds] }))
-          // Simple logic: pick class with lowest average score to balance it
-          // Or smallest class. For simplicity, we stick them in the smallest class.
           let targetIdx = 0
           let minSize = Infinity
           copy.forEach((c, i) => { if(c.studentIds.length < minSize) { minSize = c.studentIds.length; targetIdx = i } })
@@ -1083,9 +842,7 @@ export default function App() {
       setDraftStudent(null)
   }
 
-  // ---- Running the Algorithm ----
   const runBalancing = () => {
-    // 1. Prepare Constraints
     const keepTogetherPairs = []
     const keepApartPairs = []
     if (mode !== 'leveled') {
@@ -1096,30 +853,25 @@ export default function App() {
     const options = { criteria, keepTogetherPairs, keepApartPairs, classMeta, levelOn }
     let result
 
-    // 2. Run selected mode
     if (mode === 'leveled') {
       result = runLeveledPlace(studentsById, allIds, numClasses, options)
     } else {
       result = runAutoPlace(studentsById, allIds, numClasses, options)
     }
 
-    // 3. Apply results
     setClasses(result.classes)
     setHasManualChanges(false)
   }
 
-  // Trigger initial run when data loads
   useEffect(() => {
     if (allIds.length > 0 && classes.length === 0) runBalancing()
   }, [studentsById, allIds.length, numClasses, criteria, mode, levelOn])
-
 
   const handleRunClick = () => {
     if (hasManualChanges) setShowConfirmModal(true)
       else runBalancing()
   }
 
-  // ---- File I/O ----
   const exportCSV = () => {
     const studentClassMap = new Map()
     classes.forEach(cls => cls.studentIds.forEach(id => studentClassMap.set(id, cls.name)))
@@ -1157,7 +909,6 @@ export default function App() {
         const newMap = new Map()
         const newIds = []
 
-        // Merge Strategy: Clean slate import
         students.forEach(s => {
           newMap.set(s.id, s)
           newIds.push(s.id)
@@ -1181,7 +932,7 @@ export default function App() {
     const data = {
       version: 'bcs-1',
       numClasses,
-      criteria: criteria.map(({ enabled, ...rest }) => rest), // Don't save transient UI state
+      criteria: criteria.map(({ enabled, ...rest }) => rest),
       students: Array.from(studentsById.values()),
       classMeta,
       classes
@@ -1201,7 +952,6 @@ export default function App() {
         const newIds = []
 
         data.students.forEach(s => {
-          // Re-construct student object safely
           const student = {
             ...s,
             pinClass: s.pinClass ?? null,
@@ -1230,17 +980,6 @@ export default function App() {
     }
   }
 
-  // --- Render Helpers ---
-  function Field({ label, children }) {
-    return (
-      <div className="flex flex-col gap-1.5 min-w-[140px]">
-      <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{label}</div>
-      {children}
-      </div>
-    )
-  }
-
-  // Print Styles Injection
   const printStyles = `
   @media print {
     :root, body, #root, .min-h-screen {
@@ -1408,7 +1147,6 @@ export default function App() {
       </div>
       </div>
     ))}
-    {/* Add Factor Button */}
     <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-3 flex flex-col justify-center gap-2 bg-slate-50/50 dark:bg-slate-800/50">
     <input value={newCritName} onChange={e => setNewCritName(e.target.value)} placeholder="New factor name..." className="border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-sm w-full bg-white dark:bg-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none" />
     <button onClick={() => { const label = newCritName.trim(); if (!label || criteria.some(c => c.label === label)) return; setCriteria(prev => [...prev, { label, weight: 1.0, max: 100, enabled: true }]); setNewCritName('') }} className="w-full py-1.5 rounded bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition">
@@ -1418,14 +1156,14 @@ export default function App() {
     </div>
     </div>
 
-    <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
+    {/* PRINT SECTIONS */}
+    <GradeLevelStats allIds={allIds} studentsById={studentsById} criteria={criteria} />
 
     {/* --- CLASS BUCKETS --- */}
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-6 print-reset-grid">
     {(() => {
       const cls = classes.map((c, idx) => ({ ...c, name: classMeta[idx]?.name || c.name, studentIds: [...c.studentIds] }))
 
-      // Sort Logic within buckets
       cls.forEach(c => {
         if (sortMode === 'overallHigh') c.studentIds.sort((a, b) => getCompositeScore(studentsById, b, criteria, criteriaSig) - getCompositeScore(studentsById, a, criteria, criteriaSig))
           else if (sortMode === 'overallLow') c.studentIds.sort((a, b) => getCompositeScore(studentsById, a, criteria, criteriaSig) - getCompositeScore(studentsById, b, criteria, criteriaSig))
@@ -1438,13 +1176,13 @@ export default function App() {
         const meters = calculateClassMeters(c, studentsById, criteria, allIds, criteriaSig)
 
         return (
-          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-clean print-full-width">
+          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-full-width">
           <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800">
           <input className="font-bold text-lg text-slate-800 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none w-full transition-colors" value={classMeta[idx]?.name ?? c.name} onChange={e => { const v = e.target.value; setClassMeta(prev => { const copy = [...prev]; copy[idx] = { ...(copy[idx] || {}), name: v }; return copy }); setClasses(prev => prev.map((x, i) => i === idx ? { ...x, name: v } : x)) }} />
           <div className="flex items-center gap-3 mt-2 text-xs font-medium text-slate-500">
           <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400 print:!bg-transparent print:!text-black print:!border print:!border-slate-300">Size: {stats.size}</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 print:bg-blue-400" style={{printColorAdjust: 'exact'}}></span><span className="print:!text-black">M {stats.M}</span></span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-400 print:bg-pink-400" style={{printColorAdjust: 'exact'}}></span><span className="print:!text-black">F {stats.F}</span></span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400"></span><span className="print:!text-black">M {stats.M}</span></span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-400"></span><span className="print:!text-black">F {stats.F}</span></span>
           </div>
 
           <div className="mt-4 space-y-2 no-print">
@@ -1476,8 +1214,16 @@ export default function App() {
                 <div>
                 <div className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight">{st.name}</div>
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500 font-medium">
-                <span className="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 px-1.5 py-0.5 rounded text-[10px] font-bold">{Math.round(overall)}</span>
-                <span className="opacity-80 text-[10px]">{scoreBits.join(' · ')}</span>
+                {st.ignoreScores ? (
+                  <span className="bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-tighter">
+                  Non-Scored Student
+                  </span>
+                ) : (
+                  <>
+                  <span className="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 px-1.5 py-0.5 rounded text-[10px] font-bold">{Math.round(overall)}</span>
+                  <span className="opacity-80 text-[10px]">{scoreBits.join(' · ')}</span>
+                  </>
+                )}
                 </div>
                 </div>
                 </div>
@@ -1498,18 +1244,14 @@ export default function App() {
               )
           })}
           </ul>
-          {/* Print Table (Hidden on screen) */}
-          <div className="print-only-content class-roster-container">
-          <table className="w-full text-xs border-collapse">
+          <div className="print-only-content">
+          <table className="w-full text-xs">
           <thead>
-          <tr className="border-b border-gray-400 text-left">
-          <th className="py-1 w-[18%]">Name</th>
-          <th className="py-1 w-[5%] text-center">Gen</th>
-          <th className="py-1 w-[10%]">Tags</th>
-          {criteria.some(c => c.enabled) && <th className="py-1 w-[7%] text-right">Score</th>}
-          {criteria.filter(c => c.enabled).map(c => <th key={c.label} className="py-1 w-[5%] text-right text-[9px]">{c.label.substring(0,3)}</th>)}
-          <th className="py-1 w-[10%] pl-2">Previous</th>
-          <th className="py-1 w-auto pl-2">Notes</th>
+          <tr className="border-b text-left">
+          <th className="py-1">Name</th>
+          <th className="py-1 text-center">Gen</th>
+          <th className="py-1">Tags</th>
+          <th className="py-1 text-right">Score</th>
           </tr>
           </thead>
           <tbody>
@@ -1518,13 +1260,10 @@ export default function App() {
             if (!st) return null
               return (
                 <tr key={id} className="border-b border-gray-100">
-                <td className="py-1 truncate">{st.lastName}, {st.firstName}</td>
+                <td className="py-1">{st.lastName}, {st.firstName}</td>
                 <td className="py-1 text-center">{st.gender}</td>
-                <td className="py-1 text-[9px] text-gray-500 leading-tight">{(st.tags || []).join(', ')}</td>
-                {criteria.some(c => c.enabled) && <td className="py-1 text-right">{Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}</td>}
-                {criteria.filter(c => c.enabled).map(c => <td key={c.label} className="py-1 text-right text-gray-500">{st.criteria?.[c.label] ?? 0}</td>)}
-                <td className="py-1 text-gray-700 text-[9px] pl-2 truncate">{st.previousTeacher}</td>
-                <td className="py-1 text-gray-700 text-[9px] pl-2 italic leading-tight">{st.notes}</td>
+                <td className="py-1 text-[9px]">{(st.tags || []).join(', ')}</td>
+                <td className="py-1 text-right">{st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}</td>
                 </tr>
               )
           })}
@@ -1538,13 +1277,13 @@ export default function App() {
     })()}
     </div>
 
-    <PrintSeparations studentsById={studentsById} allIds={allIds} />
-
+    {/* MANUAL PINS & RELATIONSHIPS */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
     <h2 className="text-lg font-bold text-slate-800 dark:text-white mb-4">Manual Pins & Relationships</h2>
     <ManualPins allIds={allIds} studentsById={studentsById} numClasses={numClasses} setStudentsById={setStudentsById} classes={classes} setBlockedMoveMessage={setBlockedMoveMessage} />
     </div>
 
+    {/* STUDENT ROSTER */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
     <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
     <h2 className="text-lg font-bold text-slate-800 dark:text-white">Student Roster</h2>
@@ -1554,7 +1293,6 @@ export default function App() {
     </div>
     </div>
 
-    {/* UPDATED: 2-COLUMN GRID FOR LARGE SCREENS */}
     <div className="overflow-y-auto max-h-[600px] pr-2 grid grid-cols-1 xl:grid-cols-2 gap-4">
     {[...allIds]
       .filter(id => (studentsById.get(id)?.name + id).toLowerCase().includes(search.toLowerCase()))
@@ -1569,39 +1307,18 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
-          <div className="space-y-1">
-          <div className="text-[10px] uppercase text-slate-400 font-bold">First Name</div>
-          <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.firstName || ''} onChange={e => updateStudent(s.id, { firstName: e.target.value })} />
-          </div>
-          <div className="space-y-1">
-          <div className="text-[10px] uppercase text-slate-400 font-bold">Last Name</div>
-          <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.lastName || ''} onChange={e => updateStudent(s.id, { lastName: e.target.value })} />
-          </div>
-          <div className="space-y-1">
-          <div className="text-[10px] uppercase text-slate-400 font-bold">Gender</div>
+          <Field label="First Name"><input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.firstName || ''} onChange={e => updateStudent(s.id, { firstName: e.target.value })} /></Field>
+          <Field label="Last Name"><input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.lastName || ''} onChange={e => updateStudent(s.id, { lastName: e.target.value })} /></Field>
+          <Field label="Gender">
           <select className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.gender || ''} onChange={e => updateStudent(s.id, { gender: e.target.value || undefined })}>
           <option value="">—</option><option value="M">Male</option><option value="F">Female</option>
           </select>
-          </div>
-          <div className="space-y-1">
-          <div className="text-[10px] uppercase text-slate-400 font-bold">Prev Teacher</div>
-          <input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.previousTeacher || ''} onChange={e => updateStudent(s.id, { previousTeacher: e.target.value })} />
-          </div>
+          </Field>
+          <Field label="Prev Teacher"><input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.previousTeacher || ''} onChange={e => updateStudent(s.id, { previousTeacher: e.target.value })} /></Field>
           </div>
 
-          {/* UPDATED: TAGS EDITING */}
-          <div className="mb-3">
-          <div className="text-[10px] uppercase text-slate-400 font-bold mb-1">Tags (Comma Separated)</div>
-          <input
-          className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 bg-slate-50 dark:bg-slate-900 dark:text-white text-xs"
-          placeholder="e.g. IEP, Math Support..."
-          value={(s.tags || []).join(', ')}
-          onChange={e=> {
-            const val = e.target.value;
-            updateStudent(s.id, { tags: val.split(',').map(t=>t.trim()).filter(Boolean) })
-          }}
-          />
-          </div>
+          {/* FIX FOR BUG #1: Tag Editor component */}
+          <TagEditor student={s} onUpdate={(patch) => updateStudent(s.id, patch)} />
 
           <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
@@ -1625,7 +1342,9 @@ export default function App() {
       })}
       </div>
       </div>
+      </div>
 
+      {/* MODAL: ADD STUDENT */}
       <Modal open={showAdd} onClose={() => { setShowAdd(false); setDraftStudent(null) }} title="Add New Student">
       {draftStudent && (
         <div className="space-y-4">
@@ -1654,7 +1373,269 @@ export default function App() {
         </div>
       )}
       </Modal>
+
+      <div className="no-print">
+      <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
+      <PrintSeparations studentsById={studentsById} allIds={allIds} />
       </div>
+
       </div>
   )
+}
+
+function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes, setBlockedMoveMessage }) {
+  const [selectedId, setSelectedId] = useState('')
+  const [constraintSearch, setConstraintSearch] = useState('')
+
+  useEffect(() => {
+    if (selectedId && !allIds.includes(selectedId)) setSelectedId('')
+  }, [allIds, selectedId])
+
+  const selectedStudent = selectedId ? studentsById.get(selectedId) : null
+  const sortedIds = useMemo(() => [...allIds].sort((a, b) => (studentsById.get(a)?.name || '').localeCompare(studentsById.get(b)?.name || '')), [allIds, studentsById])
+
+  const batchUpdate = (updates) => {
+    setStudentsById(prev => {
+      const newMap = new Map(prev)
+      updates.forEach(({ id, patch }) => {
+        newMap.set(id, { ...newMap.get(id), ...patch })
+      })
+      return newMap
+    })
+  }
+
+  const togglePin = (type, targetId) => {
+    const targetStudent = studentsById.get(targetId)
+    const selectedName = selectedStudent?.name || selectedId
+    const targetName = targetStudent?.name || targetId
+
+    const isKeepWith = type === 'pinKeepWith'
+    const currentList = selectedStudent?.[type] || []
+    const isCurrentlySet = currentList.includes(targetId)
+
+    if (isCurrentlySet) {
+      const newList = currentList.filter(id => id !== targetId)
+      const reciprocalType = isKeepWith ? 'pinKeepWith' : 'pinKeepApart'
+      const targetList = targetStudent?.[reciprocalType] || []
+      const newTargetList = targetList.filter(id => id !== selectedId)
+
+      batchUpdate([
+        { id: selectedId, patch: { [type]: newList } },
+        { id: targetId, patch: { [reciprocalType]: newTargetList } }
+      ])
+      return
+    }
+
+    if (isKeepWith && (targetStudent?.pinKeepApart || []).includes(selectedId)) {
+      setBlockedMoveMessage(`Conflict: ${selectedName} cannot be kept with ${targetName} because they are set to be separated.`)
+      return
+    }
+    if (!isKeepWith && (targetStudent?.pinKeepWith || []).includes(selectedId)) {
+      setBlockedMoveMessage(`Conflict: ${selectedName} cannot be separated from ${targetName} because they are set to be kept together.`)
+      return
+    }
+
+    const newList = [...currentList, targetId]
+    const reciprocalType = isKeepWith ? 'pinKeepWith' : 'pinKeepApart'
+    const targetList = targetStudent?.[reciprocalType] || []
+    const newTargetList = targetList.includes(selectedId) ? targetList : [...targetList, selectedId]
+
+    batchUpdate([
+      { id: selectedId, patch: { [type]: newList } },
+      { id: targetId, patch: { [reciprocalType]: newTargetList } }
+    ])
+  }
+
+  const getButtonClass = (targetId, currentArray) => {
+    const isActive = currentArray.includes(targetId)
+    return `px-3 py-1.5 text-xs font-medium rounded-full border transition-all duration-200 truncate ${
+      isActive
+      ? 'bg-indigo-600 text-white border-indigo-600 shadow-md transform scale-105'
+      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-indigo-300'
+    }`
+  }
+
+  const filteredTargets = sortedIds
+  .filter(id => id !== selectedId)
+  .filter(id => {
+    const name = studentsById.get(id)?.name || ''
+    return constraintSearch === '' || name.toLowerCase().includes(constraintSearch.toLowerCase())
+  })
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <div className="lg:col-span-4 bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border border-slate-100 dark:border-slate-800">
+    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Student Focus</div>
+    <select
+    className="form-select block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
+    value={selectedId || ''}
+    onChange={e => setSelectedId(e.target.value || null)}
+    >
+    <option value="">(Select Student)</option>
+    {sortedIds.map(id => <option key={id} value={id}>{studentsById.get(id)?.name}</option>)}
+    </select>
+
+    {selectedStudent && (
+      <div className="mt-4">
+      <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Pin to Class</div>
+      <select
+      className="block w-full border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm bg-white dark:bg-slate-800 dark:text-white py-2 px-3"
+      value={selectedStudent?.pinClass ?? ''}
+      onChange={e => {
+        const val = e.target.value === '' ? null : Number(e.target.value)
+        batchUpdate([{ id: selectedId, patch: { pinClass: val } }])
+      }}
+      >
+      <option value="">None (Auto-sort)</option>
+      {Array.from({ length: numClasses }, (_, i) => (
+        <option key={i} value={i}>{classes[i]?.name || `Class ${i + 1}`}</option>
+      ))}
+      </select>
+      </div>
+    )}
+    </div>
+
+    {['pinKeepWith', 'pinKeepApart'].map((type) => {
+      if (!selectedStudent) return null
+        const currentList = selectedStudent?.[type] || []
+        const isKeepWith = type === 'pinKeepWith'
+
+        return (
+          <div key={type} className="lg:col-span-4 flex flex-col h-full">
+          <div className="flex items-center justify-between mb-2">
+          <div className={`text-sm font-bold ${isKeepWith ? 'text-indigo-600 dark:text-indigo-400' : 'text-rose-600 dark:text-rose-400'}`}>
+          {isKeepWith ? 'Keep With' : 'Separate From'}
+          </div>
+          <button
+          className="text-xs font-medium text-slate-400 hover:text-rose-500 transition"
+          onClick={() => batchUpdate([{ id: selectedId, patch: { [type]: [] } }])}
+          >
+          Clear All
+          </button>
+          </div>
+
+          <input
+          type="text"
+          value={constraintSearch}
+          onChange={(e) => setConstraintSearch(e.target.value)}
+          placeholder="Search..."
+          className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg mb-3 bg-white dark:bg-slate-800 dark:text-white text-sm focus:ring-2 focus:ring-indigo-100 outline-none"
+          />
+
+          <div className="flex-1 border border-slate-200 dark:border-slate-700 rounded-xl p-3 max-h-64 overflow-y-auto flex flex-wrap content-start gap-2 bg-slate-50/50 dark:bg-slate-900/50">
+          {currentList.map(id => (
+            <button key={id} onClick={() => togglePin(type, id)} className={getButtonClass(id, currentList)}>
+            <span className="mr-1">✓</span> {studentsById.get(id)?.name}
+            </button>
+          ))}
+          {filteredTargets.filter(id => !currentList.includes(id)).map(id => (
+            <button key={id} onClick={() => togglePin(type, id)} className={getButtonClass(id, currentList)}>
+            + {studentsById.get(id)?.name}
+            </button>
+          ))}
+          </div>
+          </div>
+        )
+    })}
+    </div>
+  )
+}
+
+function PrintOverview({ classes, studentsById, criteria, criteriaSig }) {
+  if (!classes || !classes.length) return null
+    const activeCriteria = criteria.filter(c => (c.weight ?? 0) > 0 && c.enabled)
+
+    return (
+      <div className="hidden print:block mb-8 break-after-page">
+      <div className="mb-6 border-b pb-4 flex justify-between items-end">
+      <div>
+      <h1 className="text-3xl font-bold text-gray-900 mb-1">Class Placement Summary</h1>
+      <p className="text-sm text-gray-500">Created with Class Balancer</p>
+      </div>
+      </div>
+      <table className="w-full text-sm border-collapse border border-gray-300">
+      <thead>
+      <tr className="bg-gray-100 text-left">
+      <th className="border border-gray-300 p-2 font-bold text-gray-900">Class Name</th>
+      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-16 text-center">Size</th>
+      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-center">Gender</th>
+      {activeCriteria.length > 0 && (
+        <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-right">Avg Score</th>
+      )}
+      {activeCriteria.map(c => (
+        <th key={c.label} className="border border-gray-300 p-2 font-bold text-gray-900 text-right">{c.label} (Avg)</th>
+      ))}
+      </tr>
+      </thead>
+      <tbody>
+      {classes.map((c, i) => {
+        const ids = c.studentIds
+        const activeIds = ids.filter(id => !studentsById.get(id)?.ignoreScores)
+        const stats = getGenderStats(studentsById, ids)
+        const sumComp = activeIds.reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0)
+        const avgComp = activeIds.length ? (sumComp / activeIds.length).toFixed(1) : '-'
+
+        return (
+          <tr key={c.id} className="even:bg-gray-50">
+          <td className="border border-gray-300 p-2 font-semibold">{c.name || `Class ${i + 1}`}</td>
+          <td className="border border-gray-300 p-2 text-center">{ids.length}</td>
+          <td className="border border-gray-300 p-2 text-center text-xs">{stats.M}M / {stats.F}F</td>
+          {activeCriteria.length > 0 && (
+            <td className="border border-gray-300 p-2 text-right font-mono">{avgComp}</td>
+          )}
+          {activeCriteria.map(crit => {
+            const sum = activeIds.reduce((acc, id) => acc + (Number(studentsById.get(id)?.criteria?.[crit.label]) || 0), 0)
+            const avg = activeIds.length ? (sum / activeIds.length).toFixed(1) : '-'
+          return <td key={crit.label} className="border border-gray-300 p-2 text-right font-mono text-gray-600">{avg}</td>
+          })}
+          </tr>
+        )
+      })}
+      </tbody>
+      </table>
+      </div>
+    )
+}
+
+function PrintSeparations({ studentsById, allIds }) {
+  const separations = useMemo(() => {
+    return allIds
+    .map(id => studentsById.get(id))
+    .filter(s => s && s.pinKeepApart && s.pinKeepApart.length > 0)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .map(s => {
+      const targetNames = s.pinKeepApart
+      .map(tid => studentsById.get(tid)?.name)
+      .filter(Boolean)
+      .sort()
+      .join(', ')
+      return { name: s.name, targets: targetNames }
+    })
+  }, [studentsById, allIds])
+
+  if (separations.length === 0) return null
+
+    return (
+      <div className="hidden print:block pt-4">
+      <div className="mb-6 border-b pb-4">
+      <h1 className="text-3xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
+      </div>
+      <table className="w-full text-sm border-collapse border border-gray-300">
+      <thead>
+      <tr className="bg-gray-100 text-left">
+      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-1/3">Student</th>
+      <th className="border border-gray-300 p-2 font-bold text-gray-900">Must Be Separated From</th>
+      </tr>
+      </thead>
+      <tbody>
+      {separations.map((row, i) => (
+        <tr key={i} className="even:bg-gray-50">
+        <td className="border border-gray-300 p-2 font-semibold">{row.name}</td>
+        <td className="border border-gray-300 p-2">{row.targets}</td>
+        </tr>
+      ))}
+      </tbody>
+      </table>
+      </div>
+    )
 }
