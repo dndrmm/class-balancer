@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
  * CONFIGURATION & HELPERS
  * ========================================================================================= */
 
-const VERSION = 'v2.3.0'
+const VERSION = 'v2.6.0'
 const BUILTIN_TAGS = ['504', 'IEP', 'ELL', 'Gifted', 'Speech']
 
 const scoreCache = new Map()
@@ -36,7 +36,6 @@ function makeCriteriaSignature(criteria) {
   return criteria.map(c => `${c.label}:${c.weight}:${c.max}:${c.enabled}`).join('|')
 }
 
-// FIX FOR BUG #2: Component defined outside App to prevent re-renders losing focus
 function Field({ label, children }) {
   return (
     <div className="flex flex-col gap-1.5 min-w-[140px]">
@@ -57,10 +56,7 @@ function getCompositeScore(studentsById, studentId, criteria, criteriaSig) {
 
     const student = studentsById.get(studentId)
 
-    // Safety checks
     if (!student) { scoreCache.set(cacheKey, 0); return 0; }
-
-    // FIX FOR BUG #3: Students ignored from balancing return 0, but logic now handles them as neutral
     if (student.ignoreScores) { scoreCache.set(cacheKey, 0); return 0; }
 
     const totalScore = criteria.reduce((acc, crit) => {
@@ -107,7 +103,6 @@ function calculateClassMeters(classData, studentsById, criteria, allIds, criteri
   const cached = metersCache.get(cacheKey)
   if (cached) return cached
 
-    // FIX FOR BUG #3: Filter out non-scored students so they don't drag down the class average
     const activeStudents = classData.studentIds.filter(id => !studentsById.get(id)?.ignoreScores)
     const studentCount = activeStudents.length
     const activeCriteria = criteria.filter(c => c.enabled)
@@ -177,7 +172,6 @@ function getGenderStats(studentsById, studentIds) {
  * SUB-COMPONENTS
  * ========================================================================================= */
 
-// FIX FOR BUG #1: Local state for tags to prevent cursor jumping/splitting issues
 function TagEditor({ student, onUpdate }) {
   const [localVal, setLocalVal] = useState((student.tags || []).join(', '))
 
@@ -203,75 +197,6 @@ function TagEditor({ student, onUpdate }) {
       }
     }}
     />
-    </div>
-  )
-}
-
-function GradeLevelStats({ allIds, studentsById, criteria }) {
-  const stats = useMemo(() => {
-    const activeIds = allIds.filter(id => !studentsById.get(id)?.ignoreScores)
-    const totalCount = allIds.length
-    let males = 0, females = 0
-
-    allIds.forEach(id => {
-      const g = studentsById.get(id)?.gender
-      if (g === 'M') males++; else if (g === 'F') females++
-    })
-
-    const criteriaStats = criteria.filter(c => c.enabled).map(crit => {
-      const vals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
-      return {
-        label: crit.label,
-        avg: vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : 0,
-                                                              max: vals.length ? Math.max(...vals) : 0,
-                                                              min: vals.length ? Math.min(...vals) : 0
-      }
-    })
-
-    return { totalCount, males, females, criteriaStats, nonScored: totalCount - activeIds.length }
-  }, [allIds, studentsById, criteria])
-
-  return (
-    <div className="hidden print:block mb-8 border-2 border-slate-200 rounded-2xl p-6 bg-slate-50">
-    <h2 className="text-2xl font-bold text-slate-800 mb-4 border-b pb-2">Grade Level Statistics</h2>
-    <div className="grid grid-cols-4 gap-6 mb-6">
-    <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Enrollment</div>
-    <div className="text-xl font-bold">{stats.totalCount} Students</div>
-    </div>
-    <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Gender</div>
-    <div className="text-xl font-bold">{stats.males}M / {stats.females}F</div>
-    </div>
-    <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Non-Scored</div>
-    <div className="text-xl font-bold text-amber-600">{stats.nonScored}</div>
-    </div>
-    <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Criteria Tracked</div>
-    <div className="text-xl font-bold">{stats.criteriaStats.length} Factors</div>
-    </div>
-    </div>
-    <table className="w-full text-sm border-collapse">
-    <thead>
-    <tr className="bg-white">
-    <th className="border p-2 text-left">Balancing Factor</th>
-    <th className="border p-2 text-right">Average Score</th>
-    <th className="border p-2 text-right">Low</th>
-    <th className="border p-2 text-right">High</th>
-    </tr>
-    </thead>
-    <tbody>
-    {stats.criteriaStats.map(s => (
-      <tr key={s.label}>
-      <td className="border p-2 font-semibold">{s.label}</td>
-      <td className="border p-2 text-right font-mono">{s.avg}</td>
-      <td className="border p-2 text-right font-mono">{s.min}</td>
-      <td className="border p-2 text-right font-mono">{s.max}</td>
-      </tr>
-    ))}
-    </tbody>
-    </table>
     </div>
   )
 }
@@ -410,7 +335,8 @@ function runAutoPlace(studentsById, allIds, numClasses, options) {
       return combinedTotal / (currentIds.length + incomingIds.length)
   }
 
-  for (const unit of freeUnits) {
+  for (const freeUnit of freeUnits) {
+    const unit = freeUnit
     const currentSizes = classes.map(c => c.studentIds.length)
     const minSize = Math.min(...currentSizes)
 
@@ -826,7 +752,7 @@ export default function App() {
           const copy = prevClasses.map(c => ({ ...c, studentIds: [...c.studentIds] }))
           let targetIdx = 0
           let minSize = Infinity
-          copy.forEach((c, i) => { if(c.studentIds.length < minSize) { minSize = c.studentIds.length; targetIdx = i } })
+          copy.forEach((c, i) => { if (c.studentIds.length < minSize) { minSize = c.studentIds.length; targetIdx = i } })
 
           copy[targetIdx].studentIds.push(student.id)
           displayStatus(`Added ${student.name} to ${copy[targetIdx].name}`, 'success')
@@ -992,9 +918,11 @@ export default function App() {
     .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
     .print-reset-grid { display: block !important; }
+
     table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
-    th, td { border: 1px solid #ccc; padding: 2px 4px; text-align: left; vertical-align: top; overflow: hidden; }
+    th, td { border: 1px solid #ccc; padding: 4px; text-align: left; vertical-align: middle; overflow: hidden; }
     th { background-color: #f3f4f6 !important; font-weight: bold; }
+
     .screen-only-content { display: none !important; }
     .print-only-content { display: block !important; }
   }
@@ -1088,7 +1016,7 @@ export default function App() {
       {criteria.map(c => <option key={c.label} value={c.label}>{c.label}</option>)}
       </select>
       </Field>
-    ) : <div/>}
+    ) : <div />}
     </div>
 
     <button onClick={handleRunClick} className={`w-full lg:w-auto px-8 py-3 rounded-xl text-white text-sm font-bold tracking-wide shadow-lg shadow-indigo-500/30 hover:shadow-indigo-500/50 hover:scale-[1.02] active:scale-95 transition-all duration-200 ease-out ${hasManualChanges ? 'bg-gradient-to-r from-rose-500 to-orange-600 ring-2 ring-rose-200 animate-pulse' : 'bg-gradient-to-r from-indigo-600 to-blue-600'}`}>
@@ -1111,7 +1039,38 @@ export default function App() {
     {/* --- CONTENT GRID --- */}
     <div className="max-w-9xl mx-auto px-6 py-8 space-y-8">
 
-    {/* CRITERIA SECTION */}
+    {/* PRINT SECTIONS - PAGE 1: COVER PAGE */}
+    <div className="hidden print:block print-break-after">
+    <div className="flex justify-between items-start mb-6 border-b pb-4">
+    <div>
+    <h1 className="text-3xl font-bold">Class Placement Report</h1>
+    <p className="text-sm text-gray-500">{new Date().toLocaleDateString()}</p>
+    </div>
+
+    <div className="flex flex-col items-end gap-2 text-sm font-bold text-slate-500 uppercase">
+    <div className="flex items-center gap-2">
+    <span>Current Grade:</span>
+    <div className="w-32 border-b-2 border-slate-300"></div>
+    </div>
+    <div className="flex items-center gap-2">
+    <span>Next Grade:</span>
+    <div className="w-32 border-b-2 border-slate-300"></div>
+    </div>
+    </div>
+    </div>
+
+    <div className="mb-8">
+    <h2 className="text-xl font-bold text-slate-800 mb-4 border-b pb-2">Class Summaries</h2>
+    <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
+    </div>
+
+    <GradeLevelStats allIds={allIds} studentsById={studentsById} criteria={criteria} />
+    </div>
+
+    {/* PRINT SECTIONS - PAGE 2: SEPARATIONS */}
+    <PrintSeparations studentsById={studentsById} allIds={allIds} />
+
+    {/* CRITERIA SECTION (Screen Only) */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
     <h2 className="text-lg font-bold text-slate-800 dark:text-white mb-4">Balancing Factors</h2>
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -1121,7 +1080,7 @@ export default function App() {
       <div className="font-bold text-slate-700 dark:text-slate-200 truncate pr-2" title={c.label}>{c.label}</div>
       <div className="flex items-center gap-2">
       <label className="text-[10px] flex items-center gap-1 text-slate-500 cursor-pointer select-none">
-      <input type="checkbox" checked={c.enabled} onChange={() => setCriteria(prev => prev.map(x => x.label === c.label ? { ...x, enabled: !x.enabled } : x))} className="rounded text-indigo-600 focus:ring-indigo-500"/> Show
+      <input type="checkbox" checked={c.enabled} onChange={() => setCriteria(prev => prev.map(x => x.label === c.label ? { ...x, enabled: !x.enabled } : x))} className="rounded text-indigo-600 focus:ring-indigo-500" /> Show
       </label>
       <button className="text-slate-400 hover:text-rose-500 transition" onClick={() => setCriteria(prev => prev.filter(x => x.label !== c.label))}>×</button>
       </div>
@@ -1156,12 +1115,14 @@ export default function App() {
     </div>
     </div>
 
-    {/* PRINT SECTIONS */}
-    <GradeLevelStats allIds={allIds} studentsById={studentsById} criteria={criteria} />
-
-    {/* --- CLASS BUCKETS --- */}
+    {/* --- CLASS BUCKETS (PAGE 3+) --- */}
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-6 print-reset-grid">
     {(() => {
+      // Screen rendering: show enabled criteria
+      // Print rendering: use CSS to hide unchecked, but here we just pass activeCriteria to the print table
+      // However, the visual 'meters' always rely on c.enabled. The print table relies on activeCriteria.
+      const activeCriteria = criteria.filter(c => c.enabled);
+
       const cls = classes.map((c, idx) => ({ ...c, name: classMeta[idx]?.name || c.name, studentIds: [...c.studentIds] }))
 
       cls.forEach(c => {
@@ -1176,13 +1137,13 @@ export default function App() {
         const meters = calculateClassMeters(c, studentsById, criteria, allIds, criteriaSig)
 
         return (
-          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-full-width">
-          <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800">
+          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-full-width print:border-none print:rounded-none print:shadow-none">
+          <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800 print:border-none">
           <input className="font-bold text-lg text-slate-800 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none w-full transition-colors" value={classMeta[idx]?.name ?? c.name} onChange={e => { const v = e.target.value; setClassMeta(prev => { const copy = [...prev]; copy[idx] = { ...(copy[idx] || {}), name: v }; return copy }); setClasses(prev => prev.map((x, i) => i === idx ? { ...x, name: v } : x)) }} />
           <div className="flex items-center gap-3 mt-2 text-xs font-medium text-slate-500">
           <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400 print:!bg-transparent print:!text-black print:!border print:!border-slate-300">Size: {stats.size}</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400"></span><span className="print:!text-black">M {stats.M}</span></span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-400"></span><span className="print:!text-black">F {stats.F}</span></span>
+          <span className="print:!text-black">M {stats.M}</span>
+          <span className="print:!text-black">F {stats.F}</span>
           </div>
 
           <div className="mt-4 space-y-2 no-print">
@@ -1244,14 +1205,30 @@ export default function App() {
               )
           })}
           </ul>
-          <div className="print-only-content">
-          <table className="w-full text-xs">
+
+          {/* UPDATED PRINT TABLE: Centered Headers & Hidden Scores */}
+          <div className="print-only-content mt-4">
+          <table className="w-full text-xs border-collapse border border-gray-300">
           <thead>
-          <tr className="border-b text-left">
-          <th className="py-1">Name</th>
-          <th className="py-1 text-center">Gen</th>
-          <th className="py-1">Tags</th>
-          <th className="py-1 text-right">Score</th>
+          <tr className="bg-gray-100 text-left">
+          <th className="border border-gray-300 py-1 px-2">Name</th>
+          <th className="border border-gray-300 py-1 px-2 text-center w-8">G</th>
+          <th className="border border-gray-300 py-1 px-2 w-24">Tags</th>
+
+          {/* SCORE FIRST */}
+          {activeCriteria.length > 0 && (
+            <th className="border border-gray-300 py-1 px-2 text-right w-12">Score</th>
+          )}
+
+          {/* INDIVIDUAL FACTORS - CENTERED HEADERS */}
+          {activeCriteria.map(crit => (
+            <th key={crit.label} className="border border-gray-300 py-1 px-2 text-center w-10">
+            {crit.label.substring(0,4)}
+            </th>
+          ))}
+
+          <th className="border border-gray-300 py-1 px-2 w-24">Prev Teacher</th>
+          <th className="border border-gray-300 py-1 px-2">Notes</th>
           </tr>
           </thead>
           <tbody>
@@ -1259,11 +1236,35 @@ export default function App() {
             const st = studentsById.get(id)
             if (!st) return null
               return (
-                <tr key={id} className="border-b border-gray-100">
-                <td className="py-1">{st.lastName}, {st.firstName}</td>
-                <td className="py-1 text-center">{st.gender}</td>
-                <td className="py-1 text-[9px]">{(st.tags || []).join(', ')}</td>
-                <td className="py-1 text-right">{st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}</td>
+                <tr key={id} className="border-b border-gray-200">
+                <td className="border border-gray-300 py-2 px-2 font-medium">
+                {st.lastName}, {st.firstName}
+                </td>
+
+                <td className="border border-gray-300 py-2 px-2 text-center">
+                {st.gender}
+                </td>
+
+                <td className="border border-gray-300 py-2 px-2 text-[10px]">
+                {st.tags && st.tags.length > 0 ? st.tags.join(', ') : ''}
+                </td>
+
+                {/* TOTAL SCORE - Shows '-' if ignored */}
+                {activeCriteria.length > 0 && (
+                  <td className="border border-gray-300 py-2 px-2 text-right font-bold">
+                  {st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}
+                  </td>
+                )}
+
+                {/* INDIVIDUAL FACTORS - Shows '-' if ignored */}
+                {activeCriteria.map(crit => (
+                  <td key={crit.label} className="border border-gray-300 py-2 px-2 text-right">
+                  {st.ignoreScores ? '-' : (Number(st.criteria?.[crit.label]) || 0)}
+                  </td>
+                ))}
+
+                <td className="border border-gray-300 py-2 px-2 text-[10px]">{st.previousTeacher}</td>
+                <td className="border border-gray-300 py-2 px-2 text-gray-600 italic text-[10px]">{st.notes}</td>
                 </tr>
               )
           })}
@@ -1317,8 +1318,18 @@ export default function App() {
           <Field label="Prev Teacher"><input className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1 bg-slate-50 dark:bg-slate-900 dark:text-white" value={s.previousTeacher || ''} onChange={e => updateStudent(s.id, { previousTeacher: e.target.value })} /></Field>
           </div>
 
-          {/* FIX FOR BUG #1: Tag Editor component */}
           <TagEditor student={s} onUpdate={(patch) => updateStudent(s.id, patch)} />
+
+          <div className="mb-3">
+          <div className="text-[10px] uppercase text-slate-400 font-bold mb-1">Notes</div>
+          <textarea
+          className="w-full border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 bg-slate-50 dark:bg-slate-900 dark:text-white text-xs resize-none focus:ring-1 focus:ring-indigo-500"
+          rows={2}
+          placeholder="Add notes about this student..."
+          value={s.notes || ''}
+          onChange={e => updateStudent(s.id, { notes: e.target.value })}
+          />
+          </div>
 
           <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
@@ -1373,11 +1384,6 @@ export default function App() {
         </div>
       )}
       </Modal>
-
-      <div className="no-print">
-      <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
-      <PrintSeparations studentsById={studentsById} allIds={allIds} />
-      </div>
 
       </div>
   )
@@ -1448,8 +1454,7 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 
   const getButtonClass = (targetId, currentArray) => {
     const isActive = currentArray.includes(targetId)
-    return `px-3 py-1.5 text-xs font-medium rounded-full border transition-all duration-200 truncate ${
-      isActive
+    return `px-3 py-1.5 text-xs font-medium rounded-full border transition-all duration-200 truncate ${isActive
       ? 'bg-indigo-600 text-white border-indigo-600 shadow-md transform scale-105'
       : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-indigo-300'
     }`
@@ -1546,13 +1551,7 @@ function PrintOverview({ classes, studentsById, criteria, criteriaSig }) {
     const activeCriteria = criteria.filter(c => (c.weight ?? 0) > 0 && c.enabled)
 
     return (
-      <div className="hidden print:block mb-8 break-after-page">
-      <div className="mb-6 border-b pb-4 flex justify-between items-end">
-      <div>
-      <h1 className="text-3xl font-bold text-gray-900 mb-1">Class Placement Summary</h1>
-      <p className="text-sm text-gray-500">Created with Class Balancer</p>
-      </div>
-      </div>
+      <div className="hidden print:block mb-8">
       <table className="w-full text-sm border-collapse border border-gray-300">
       <thead>
       <tr className="bg-gray-100 text-left">
@@ -1616,9 +1615,9 @@ function PrintSeparations({ studentsById, allIds }) {
   if (separations.length === 0) return null
 
     return (
-      <div className="hidden print:block pt-4">
+      <div className="hidden print:block print-break-after">
       <div className="mb-6 border-b pb-4">
-      <h1 className="text-3xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
+      <h1 className="text-xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
       </div>
       <table className="w-full text-sm border-collapse border border-gray-300">
       <thead>
@@ -1638,4 +1637,71 @@ function PrintSeparations({ studentsById, allIds }) {
       </table>
       </div>
     )
+}
+
+function GradeLevelStats({ allIds, studentsById, criteria }) {
+  const stats = useMemo(() => {
+    const activeIds = allIds.filter(id => !studentsById.get(id)?.ignoreScores)
+    const totalCount = allIds.length
+    let males = 0, females = 0
+
+    allIds.forEach(id => {
+      const g = studentsById.get(id)?.gender
+      if (g === 'M') males++; else if (g === 'F') females++
+    })
+
+    // CHANGED: Now filters by weight > 0 instead of c.enabled
+    // This ensures hidden factors are still calculated in the statistics
+    const criteriaStats = criteria.filter(c => (c.weight ?? 0) > 0).map(crit => {
+      const vals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
+      return {
+        label: crit.label,
+        avg: vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : 0,
+                                                                        max: vals.length ? Math.max(...vals) : 0,
+                                                                        min: vals.length ? Math.min(...vals) : 0
+      }
+    })
+
+    return { totalCount, males, females, criteriaStats }
+  }, [allIds, studentsById, criteria])
+
+  return (
+    <div className="mb-8 border-2 border-slate-200 print:border-0 rounded-2xl p-6 print:p-0 bg-slate-50 print:bg-white">
+    <h2 className="text-2xl font-bold text-slate-800 mb-4 border-b pb-2">Grade Level Statistics</h2>
+    <div className="grid grid-cols-3 gap-6 mb-6">
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Enrollment</div>
+    <div className="text-xl font-bold">{stats.totalCount} Students</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Gender</div>
+    <div className="text-xl font-bold">{stats.males}M / {stats.females}F</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500">Criteria Tracked</div>
+    <div className="text-xl font-bold">{stats.criteriaStats.length} Factors</div>
+    </div>
+    </div>
+    <table className="w-full text-sm border-collapse">
+    <thead>
+    <tr className="bg-white">
+    <th className="border p-2 text-left">Balancing Factor</th>
+    <th className="border p-2 text-right">Average Score</th>
+    <th className="border p-2 text-right">Low</th>
+    <th className="border p-2 text-right">High</th>
+    </tr>
+    </thead>
+    <tbody>
+    {stats.criteriaStats.map(s => (
+      <tr key={s.label}>
+      <td className="border p-2 font-semibold">{s.label}</td>
+      <td className="border p-2 text-right font-mono">{s.avg}</td>
+      <td className="border p-2 text-right font-mono">{s.min}</td>
+      <td className="border p-2 text-right font-mono">{s.max}</td>
+      </tr>
+    ))}
+    </tbody>
+    </table>
+    </div>
+  )
 }
