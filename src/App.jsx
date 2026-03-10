@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
+import * as XLSX from 'xlsx'
 
 /* =========================================================================================
  * CONFIGURATION & HELPERS
  * ========================================================================================= */
 
-const VERSION = 'v2.6.0'
+const VERSION = 'v2.7.4'
 const BUILTIN_TAGS = ['504', 'IEP', 'ELL', 'Gifted', 'Speech']
 
 const scoreCache = new Map()
@@ -105,7 +106,7 @@ function calculateClassMeters(classData, studentsById, criteria, allIds, criteri
 
     const activeStudents = classData.studentIds.filter(id => !studentsById.get(id)?.ignoreScores)
     const studentCount = activeStudents.length
-    const activeCriteria = criteria.filter(c => c.enabled)
+    const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0)
 
     const meters = activeCriteria.map(crit => {
       let classAverage = 0
@@ -325,16 +326,6 @@ function runAutoPlace(studentsById, allIds, numClasses, options) {
     classes[unit.targetClassIndex].studentIds.push(...unit.ids)
   }
 
-  const getClassAvgAfterAdd = (classIndex, newIds) => {
-    const currentIds = classes[classIndex].studentIds.filter(id => !studentsById.get(id)?.ignoreScores)
-    const incomingIds = newIds.filter(id => !studentsById.get(id)?.ignoreScores)
-
-    if (currentIds.length + incomingIds.length === 0) return 0
-
-      const combinedTotal = [...currentIds, ...incomingIds].reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0)
-      return combinedTotal / (currentIds.length + incomingIds.length)
-  }
-
   for (const freeUnit of freeUnits) {
     const unit = freeUnit
     const currentSizes = classes.map(c => c.studentIds.length)
@@ -492,17 +483,9 @@ function detectNumericColumn(values) {
   return totalCount > 0 && (numCount / totalCount > 0.6)
 }
 
-function processCSVFile(text) {
-  const raw = String(text || '').replace(/^\uFEFF/, '')
-  const lines = raw.split(/\r\n|\n|\r/).filter(l => l && l.trim().length > 0)
-  if (!lines.length) return { students: [], criteriaLabels: [], maxScores: {} }
-
-  const headersRaw = parseCSVLine(lines[0].trim()).map(h => h.trim())
+function processCSVData(rows, headersRaw) {
   const headersNorm = headersRaw.map(h => normalizeString(h))
   const hasSingleName = headersNorm.includes('name')
-
-  const body = lines.slice(1)
-  const rows = body.map(parseCSVLine)
   const columns = headersRaw.map((_, i) => rows.map(r => r[i] ?? ''))
 
   const coreFieldsSet = new Set(['id', 'firstname', 'lastname', 'name', 'gender', 'tags', 'notes', 'previousteacher', 'previous_teacher'])
@@ -517,9 +500,9 @@ function processCSVFile(text) {
     const values = []
 
     rows.forEach(row => {
-      const raw = (row[colIdx] || '').trim()
+      const raw = (String(row[colIdx] || '')).trim()
       let val = 0
-      if (raw) {
+      if (raw && raw !== 'undefined') {
         const num = parseFloat(raw)
         if (!isNaN(num)) val = num
           else val = LETTER_GRADE_MAP[raw.toUpperCase()] || 0
@@ -536,45 +519,62 @@ function processCSVFile(text) {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
     const rowMap = {}
-    headersNorm.forEach((key, idx) => rowMap[key] = (row[idx] ?? '').trim())
 
-    if (!rowMap['firstname'] && !rowMap['lastname'] && !rowMap['name']) continue
+    headersNorm.forEach((key, idx) => {
+      const val = row[idx];
+      const cleaned = (val === undefined || val === null || String(val).trim() === 'undefined') ? '' : String(val).trim();
+      rowMap[key] = cleaned;
+    })
 
-      let firstName = rowMap['firstname'] || ''
-      let lastName = rowMap['lastname'] || ''
-      if (!firstName && !lastName && hasSingleName && rowMap['name']) {
-        const parts = rowMap['name'].split(/\s+/)
-        firstName = parts.shift() || ''
-        lastName = parts.join(' ') || ''
-      }
+    if (!rowMap['firstname'] && !rowMap['lastname'] && !rowMap['name']) continue;
 
-      let id = rowMap['id']
-      if (!id) {
-        id = `${firstName}${lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '') || `row${i + 1}`
-      }
+    let firstName = rowMap['firstname'] || ''
+    let lastName = rowMap['lastname'] || ''
 
-      const studentCriteria = {}
-      criteriaLabels.forEach(label => {
-        studentCriteria[label] = parsedCriteriaValues.get(label)[i]
-      })
+    if (!firstName && !lastName && hasSingleName && rowMap['name']) {
+      const parts = rowMap['name'].split(/\s+/)
+      firstName = parts.shift() || ''
+      lastName = parts.join(' ') || ''
+    }
 
-      students.push({
-        id: id,
-        firstName,
-        lastName,
-        name: `${firstName} ${lastName}`.trim(),
-                    gender: rowMap['gender'] || undefined,
-                    criteria: studentCriteria,
-                    tags: (rowMap['tags'] || '').split(/[|,;/]/).map(x => x.trim()).filter(Boolean),
-                    notes: rowMap['notes'] || '',
-                    previousTeacher: rowMap['previousteacher'] || rowMap['previous_teacher'] || '',
-                    ignoreScores: false
-      })
+    let id = rowMap['id']
+    if (!id) {
+      id = `${firstName}${lastName}`.toLowerCase().replace(/[^a-z0-9]+/g, '') || `row${i + 1}`
+    }
+
+    const studentCriteria = {}
+    criteriaLabels.forEach(label => {
+      studentCriteria[label] = parsedCriteriaValues.get(label)[i]
+    })
+
+    students.push({
+      id: id,
+      firstName,
+      lastName,
+      name: `${firstName} ${lastName}`.trim(),
+                  gender: rowMap['gender'] || '',
+                  criteria: studentCriteria,
+                  tags: (rowMap['tags'] || '').split(/[|,;/]/).map(x => x.trim()).filter(Boolean),
+                  notes: rowMap['notes'] || '',
+                  previousTeacher: rowMap['previousteacher'] || rowMap['previous_teacher'] || '',
+                  ignoreScores: false
+    })
   }
 
   return { students, criteriaLabels, maxScores }
 }
 
+function processCSVFile(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '')
+  const lines = raw.split(/\r\n|\n|\r/).filter(l => l && l.trim().length > 0)
+  if (!lines.length) return { students: [], criteriaLabels: [], maxScores: {} }
+
+  const headersRaw = parseCSVLine(lines[0].trim()).map(h => h.trim())
+  const body = lines.slice(1)
+  const rows = body.map(parseCSVLine)
+
+  return processCSVData(rows, headersRaw)
+}
 
 /* =========================================================================================
  * MAIN APPLICATION
@@ -822,11 +822,30 @@ export default function App() {
     const a = document.createElement('a'); a.href = url; a.download = 'balanced-roster.csv'; a.click(); URL.revokeObjectURL(url)
   }
 
-  const importCSV = async (file) => {
-    try {
-      const text = await file.text()
-      const { students, criteriaLabels, maxScores } = processCSVFile(text)
-      if (!students.length) throw new Error('No valid student rows found.')
+  const importFile = (file) => {
+    const reader = new FileReader();
+    const fileName = file.name.toLowerCase();
+
+    reader.onload = (e) => {
+      try {
+        let parsedData;
+        if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const firstSheet = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheet];
+          const jsonRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+          if (!jsonRows.length) throw new Error('Excel sheet is empty.');
+          const headersRaw = jsonRows[0].map(h => String(h || '').trim());
+          const rows = jsonRows.slice(1);
+          parsedData = processCSVData(rows, headersRaw);
+        } else {
+          parsedData = processCSVFile(e.target.result);
+        }
+
+        const { students, criteriaLabels, maxScores } = parsedData;
+        if (!students.length) throw new Error('No valid student rows found.');
 
         const newCriteria = criteriaLabels.map(label => ({
           label, weight: 1.0, max: maxScores[label] || 100, enabled: true
@@ -849,8 +868,15 @@ export default function App() {
 
         displayStatus(`Successfully imported ${newIds.length} students.`, 'success')
         setHasManualChanges(false)
-    } catch (err) {
-      displayStatus('Import failed: ' + err.message, 'error')
+      } catch (err) {
+        displayStatus('Import failed: ' + err.message, 'error')
+      }
+    };
+
+    if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file);
     }
   }
 
@@ -912,21 +938,29 @@ export default function App() {
       background-color: white !important; color: black !important;
       min-height: 0 !important; height: auto !important; overflow: visible !important;
     }
-    .dark\\:bg-slate-900, .dark\\:text-white { background-color: white !important; color: black !important; }
-    @page { margin: 0.5cm; size: auto; }
+
+    /* Ensure Tailwind backgrounds print for our modern badges */
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    @page { margin: 0.5cm; size: landscape; }
+
     .no-print { display: none !important; }
     .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
-    .print-reset-grid { display: block !important; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
-    th, td { border: 1px solid #ccc; padding: 4px; text-align: left; vertical-align: middle; overflow: hidden; }
-    th { background-color: #f3f4f6 !important; font-weight: bold; }
+    /* Modern, Clean Print Table UI */
+    table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; margin-bottom: 2rem; }
+    th, td { padding: 8px 6px; text-align: left; vertical-align: top; overflow: hidden; }
 
-    .screen-only-content { display: none !important; }
-    .print-only-content { display: block !important; }
+    /* Heavy grid borders are gone, replaced with elegant bottom borders */
+    th { color: #475569; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; border-bottom: 2px solid #cbd5e1; }
+    td { border-bottom: 1px solid #e2e8f0; color: #1e293b; }
+
+    tr { break-inside: avoid; page-break-inside: avoid; }
   }
-  .print-only-content { display: none; }
   `
 
   return (
@@ -972,8 +1006,8 @@ export default function App() {
 
     <div className="flex flex-wrap items-center gap-2">
     <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
-    <button onClick={() => document.getElementById('csvInput')?.click()} className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300">Import Roster</button>
-    <input id="csvInput" type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { importCSV(f); e.target.value = '' } }} />
+    <button onClick={() => document.getElementById('fileInput')?.click()} className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300">Import Roster</button>
+    <input id="fileInput" type="file" accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { importFile(f); e.target.value = '' } }} />
 
     <button onClick={exportCSV} className="px-3 py-1.5 rounded-md text-sm font-medium hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm transition text-slate-700 dark:text-slate-300">Export Roster</button>
     <div className="w-px h-4 bg-slate-300 mx-1"></div>
@@ -1039,20 +1073,20 @@ export default function App() {
     {/* --- CONTENT GRID --- */}
     <div className="max-w-9xl mx-auto px-6 py-8 space-y-8">
 
-    {/* PRINT SECTIONS - PAGE 1: COVER PAGE */}
+    {/* PRINT SECTIONS - PAGE 1: COVER PAGE & SUMMARIES */}
     <div className="hidden print:block print-break-after">
-    <div className="flex justify-between items-start mb-6 border-b pb-4">
+    <div className="flex justify-between items-start mb-6 border-b-2 border-slate-200 pb-4">
     <div>
-    <h1 className="text-3xl font-bold">Class Placement Report</h1>
-    <p className="text-sm text-gray-500">{new Date().toLocaleDateString()}</p>
+    <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Class Placement Report</h1>
+    <p className="text-sm font-medium text-slate-500 mt-1">{new Date().toLocaleDateString()}</p>
     </div>
 
-    <div className="flex flex-col items-end gap-2 text-sm font-bold text-slate-500 uppercase">
-    <div className="flex items-center gap-2">
+    <div className="flex flex-col items-end gap-3 text-sm font-bold text-slate-600 uppercase tracking-wide">
+    <div className="flex items-center gap-3">
     <span>Current Grade:</span>
     <div className="w-32 border-b-2 border-slate-300"></div>
     </div>
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-3">
     <span>Next Grade:</span>
     <div className="w-32 border-b-2 border-slate-300"></div>
     </div>
@@ -1060,15 +1094,22 @@ export default function App() {
     </div>
 
     <div className="mb-8">
-    <h2 className="text-xl font-bold text-slate-800 mb-4 border-b pb-2">Class Summaries</h2>
+    <h2 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider text-slate-500">Class Summaries</h2>
     <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
     </div>
+    </div>
 
+    {/* PRINT SECTIONS - PAGE 2: GRADE LEVEL STATS */}
+    <div className="hidden print:block print-break-after">
     <GradeLevelStats allIds={allIds} studentsById={studentsById} criteria={criteria} />
     </div>
 
-    {/* PRINT SECTIONS - PAGE 2: SEPARATIONS */}
+    {/* PRINT SECTIONS - PAGE 3: SEPARATIONS */}
     <PrintSeparations studentsById={studentsById} allIds={allIds} />
+
+    {/* PRINT SECTIONS - PAGE 4+: DEDICATED ROSTERS */}
+    <PrintClassRosters classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} sortMode={sortMode} classMeta={classMeta} />
+
 
     {/* CRITERIA SECTION (Screen Only) */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
@@ -1115,14 +1156,10 @@ export default function App() {
     </div>
     </div>
 
-    {/* --- CLASS BUCKETS (PAGE 3+) --- */}
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-6 print-reset-grid">
+    {/* --- CLASS BUCKETS (Screen Only) --- */}
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-6 no-print">
     {(() => {
-      // Screen rendering: show enabled criteria
-      // Print rendering: use CSS to hide unchecked, but here we just pass activeCriteria to the print table
-      // However, the visual 'meters' always rely on c.enabled. The print table relies on activeCriteria.
-      const activeCriteria = criteria.filter(c => c.enabled);
-
+      const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0);
       const cls = classes.map((c, idx) => ({ ...c, name: classMeta[idx]?.name || c.name, studentIds: [...c.studentIds] }))
 
       cls.forEach(c => {
@@ -1137,16 +1174,16 @@ export default function App() {
         const meters = calculateClassMeters(c, studentsById, criteria, allIds, criteriaSig)
 
         return (
-          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm print-break-after print-full-width print:border-none print:rounded-none print:shadow-none">
-          <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800 print:border-none">
+          <div key={c.id} className="flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 backdrop-blur-sm">
+          <div className="p-4 bg-white dark:bg-slate-900 rounded-t-2xl border-b border-slate-100 dark:border-slate-800">
           <input className="font-bold text-lg text-slate-800 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none w-full transition-colors" value={classMeta[idx]?.name ?? c.name} onChange={e => { const v = e.target.value; setClassMeta(prev => { const copy = [...prev]; copy[idx] = { ...(copy[idx] || {}), name: v }; return copy }); setClasses(prev => prev.map((x, i) => i === idx ? { ...x, name: v } : x)) }} />
           <div className="flex items-center gap-3 mt-2 text-xs font-medium text-slate-500">
-          <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400 print:!bg-transparent print:!text-black print:!border print:!border-slate-300">Size: {stats.size}</span>
-          <span className="print:!text-black">M {stats.M}</span>
-          <span className="print:!text-black">F {stats.F}</span>
+          <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400">Size: {stats.size}</span>
+          <span>M {stats.M}</span>
+          <span>F {stats.F}</span>
           </div>
 
-          <div className="mt-4 space-y-2 no-print">
+          <div className="mt-4 space-y-2">
           {meters.map(m => (
             <div key={m.label} title={`Class Avg: ${m.avg.toFixed(2)}`}>
             <div className="flex justify-between text-[10px] font-bold text-slate-400 mb-0.5 uppercase tracking-wide">
@@ -1162,7 +1199,7 @@ export default function App() {
           </div>
 
           <div className="p-3 flex-1 overflow-y-auto min-h-[300px]">
-          <ul className="space-y-2 screen-only-content h-full" onDragOver={e => e.preventDefault()} onDrop={e => handleDrop(idx, e)}>
+          <ul className="space-y-2 h-full" onDragOver={e => e.preventDefault()} onDrop={e => handleDrop(idx, e)}>
           {c.studentIds.map(id => {
             const st = studentsById.get(id)
             if (!st) return null
@@ -1205,72 +1242,6 @@ export default function App() {
               )
           })}
           </ul>
-
-          {/* UPDATED PRINT TABLE: Centered Headers & Hidden Scores */}
-          <div className="print-only-content mt-4">
-          <table className="w-full text-xs border-collapse border border-gray-300">
-          <thead>
-          <tr className="bg-gray-100 text-left">
-          <th className="border border-gray-300 py-1 px-2">Name</th>
-          <th className="border border-gray-300 py-1 px-2 text-center w-8">G</th>
-          <th className="border border-gray-300 py-1 px-2 w-24">Tags</th>
-
-          {/* SCORE FIRST */}
-          {activeCriteria.length > 0 && (
-            <th className="border border-gray-300 py-1 px-2 text-right w-12">Score</th>
-          )}
-
-          {/* INDIVIDUAL FACTORS - CENTERED HEADERS */}
-          {activeCriteria.map(crit => (
-            <th key={crit.label} className="border border-gray-300 py-1 px-2 text-center w-10">
-            {crit.label.substring(0,4)}
-            </th>
-          ))}
-
-          <th className="border border-gray-300 py-1 px-2 w-24">Prev Teacher</th>
-          <th className="border border-gray-300 py-1 px-2">Notes</th>
-          </tr>
-          </thead>
-          <tbody>
-          {c.studentIds.map(id => {
-            const st = studentsById.get(id)
-            if (!st) return null
-              return (
-                <tr key={id} className="border-b border-gray-200">
-                <td className="border border-gray-300 py-2 px-2 font-medium">
-                {st.lastName}, {st.firstName}
-                </td>
-
-                <td className="border border-gray-300 py-2 px-2 text-center">
-                {st.gender}
-                </td>
-
-                <td className="border border-gray-300 py-2 px-2 text-[10px]">
-                {st.tags && st.tags.length > 0 ? st.tags.join(', ') : ''}
-                </td>
-
-                {/* TOTAL SCORE - Shows '-' if ignored */}
-                {activeCriteria.length > 0 && (
-                  <td className="border border-gray-300 py-2 px-2 text-right font-bold">
-                  {st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}
-                  </td>
-                )}
-
-                {/* INDIVIDUAL FACTORS - Shows '-' if ignored */}
-                {activeCriteria.map(crit => (
-                  <td key={crit.label} className="border border-gray-300 py-2 px-2 text-right">
-                  {st.ignoreScores ? '-' : (Number(st.criteria?.[crit.label]) || 0)}
-                  </td>
-                ))}
-
-                <td className="border border-gray-300 py-2 px-2 text-[10px]">{st.previousTeacher}</td>
-                <td className="border border-gray-300 py-2 px-2 text-gray-600 italic text-[10px]">{st.notes}</td>
-                </tr>
-              )
-          })}
-          </tbody>
-          </table>
-          </div>
           </div>
           </div>
         )
@@ -1278,13 +1249,11 @@ export default function App() {
     })()}
     </div>
 
-    {/* MANUAL PINS & RELATIONSHIPS */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
     <h2 className="text-lg font-bold text-slate-800 dark:text-white mb-4">Manual Pins & Relationships</h2>
     <ManualPins allIds={allIds} studentsById={studentsById} numClasses={numClasses} setStudentsById={setStudentsById} classes={classes} setBlockedMoveMessage={setBlockedMoveMessage} />
     </div>
 
-    {/* STUDENT ROSTER */}
     <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-5 no-print">
     <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
     <h2 className="text-lg font-bold text-slate-800 dark:text-white">Student Roster</h2>
@@ -1355,7 +1324,6 @@ export default function App() {
       </div>
       </div>
 
-      {/* MODAL: ADD STUDENT */}
       <Modal open={showAdd} onClose={() => { setShowAdd(false); setDraftStudent(null) }} title="Add New Student">
       {draftStudent && (
         <div className="space-y-4">
@@ -1384,7 +1352,6 @@ export default function App() {
         </div>
       )}
       </Modal>
-
       </div>
   )
 }
@@ -1548,22 +1515,20 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
 
 function PrintOverview({ classes, studentsById, criteria, criteriaSig }) {
   if (!classes || !classes.length) return null
-    const activeCriteria = criteria.filter(c => (c.weight ?? 0) > 0 && c.enabled)
+
+    const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0)
 
     return (
-      <div className="hidden print:block mb-8">
-      <table className="w-full text-sm border-collapse border border-gray-300">
+      <table className="w-full text-sm">
       <thead>
-      <tr className="bg-gray-100 text-left">
-      <th className="border border-gray-300 p-2 font-bold text-gray-900">Class Name</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-16 text-center">Size</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-center">Gender</th>
+      <tr>
+      <th className="w-[20%]">Class Name</th>
+      <th className="text-center w-[8%]">Size</th>
+      <th className="text-center w-[12%]">Gender</th>
       {activeCriteria.length > 0 && (
-        <th className="border border-gray-300 p-2 font-bold text-gray-900 w-24 text-right">Avg Score</th>
+        <th className="text-center w-[12%]">Avg Score</th>
       )}
-      {activeCriteria.map(c => (
-        <th key={c.label} className="border border-gray-300 p-2 font-bold text-gray-900 text-right">{c.label} (Avg)</th>
-      ))}
+      <th className="w-[48%]">Factor Averages</th>
       </tr>
       </thead>
       <tbody>
@@ -1575,23 +1540,112 @@ function PrintOverview({ classes, studentsById, criteria, criteriaSig }) {
         const avgComp = activeIds.length ? (sumComp / activeIds.length).toFixed(1) : '-'
 
         return (
-          <tr key={c.id} className="even:bg-gray-50">
-          <td className="border border-gray-300 p-2 font-semibold">{c.name || `Class ${i + 1}`}</td>
-          <td className="border border-gray-300 p-2 text-center">{ids.length}</td>
-          <td className="border border-gray-300 p-2 text-center text-xs">{stats.M}M / {stats.F}F</td>
+          <tr key={c.id}>
+          <td className="font-bold text-slate-800">{c.name || `Class ${i + 1}`}</td>
+          <td className="text-center font-medium">{ids.length}</td>
+          <td className="text-center text-slate-500">{stats.M}M / {stats.F}F</td>
           {activeCriteria.length > 0 && (
-            <td className="border border-gray-300 p-2 text-right font-mono">{avgComp}</td>
+            <td className="text-center font-extrabold text-indigo-600">{avgComp}</td>
           )}
+          <td>
+          <div className="flex flex-wrap gap-2">
           {activeCriteria.map(crit => {
             const sum = activeIds.reduce((acc, id) => acc + (Number(studentsById.get(id)?.criteria?.[crit.label]) || 0), 0)
             const avg = activeIds.length ? (sum / activeIds.length).toFixed(1) : '-'
-          return <td key={crit.label} className="border border-gray-300 p-2 text-right font-mono text-gray-600">{avg}</td>
+            return (
+              <span key={crit.label} className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[9px] text-slate-700">
+              <span className="font-bold text-slate-900">{crit.label.substring(0, 4)}:</span> {avg}
+              </span>
+            )
           })}
+          </div>
+          </td>
           </tr>
         )
       })}
       </tbody>
       </table>
+    )
+}
+
+function PrintClassRosters({ classes, studentsById, criteria, criteriaSig, sortMode, classMeta }) {
+  if (!classes || !classes.length) return null
+
+    const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0)
+
+    return (
+      <div className="hidden print:block w-full">
+      {classes.map((c, idx) => {
+        const sortedIds = [...c.studentIds]
+        if (sortMode === 'overallHigh') sortedIds.sort((a, b) => getCompositeScore(studentsById, b, criteria, criteriaSig) - getCompositeScore(studentsById, a, criteria, criteriaSig))
+          else if (sortMode === 'overallLow') sortedIds.sort((a, b) => getCompositeScore(studentsById, a, criteria, criteriaSig) - getCompositeScore(studentsById, b, criteria, criteriaSig))
+            else if (sortMode === 'lastName') sortedIds.sort((a, b) => (studentsById.get(a)?.lastName || '').localeCompare(studentsById.get(b)?.lastName || ''))
+              else if (sortMode === 'firstName') sortedIds.sort((a, b) => (studentsById.get(a)?.firstName || '').localeCompare(studentsById.get(b)?.firstName || ''))
+
+                return (
+                  <div key={c.id} className="print-break-after w-full mb-8">
+                  <h2 className="text-2xl font-extrabold text-slate-900 mb-4">{classMeta[idx]?.name || c.name || `Class ${idx + 1}`} Roster</h2>
+                  <table className="w-full">
+                  <thead>
+                  <tr>
+                  <th className="w-[18%]">Name</th>
+                  <th className="text-center w-[5%]">G</th>
+                  <th className="w-[12%]">Tags</th>
+                  {activeCriteria.length > 0 && <th className="text-center w-[8%]">Score</th>}
+                  <th className="w-[32%]">Factor Breakdown</th>
+                  <th className="w-[25%]">Notes & Prev</th>
+                  </tr>
+                  </thead>
+                  <tbody>
+                  {sortedIds.map(id => {
+                    const st = studentsById.get(id)
+                    if (!st) return null
+                      return (
+                        <tr key={id}>
+                        <td className="font-bold text-sm text-slate-900">{st.lastName}, {st.firstName}</td>
+                        <td className="text-center font-medium text-slate-500">{st.gender}</td>
+                        <td>
+                        {st.tags && st.tags.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                          {st.tags.map(t => (
+                            <span key={t} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[9px] font-bold">{t}</span>
+                          ))}
+                          </div>
+                        ) : null}
+                        </td>
+                        {activeCriteria.length > 0 && (
+                          <td className="text-center font-extrabold text-sm">
+                          {st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}
+                          </td>
+                        )}
+                        <td>
+                        <div className="flex flex-wrap gap-1.5">
+                        {activeCriteria.map(crit => (
+                          <span key={crit.label} className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[9px] text-slate-700">
+                          <span className="font-bold text-slate-900">{crit.label.substring(0, 4)}:</span>
+                          <span>{st.ignoreScores ? '-' : (Number(st.criteria?.[crit.label]) || 0)}</span>
+                          </span>
+                        ))}
+                        </div>
+                        </td>
+                        <td>
+                        <div className="flex flex-col gap-1.5">
+                        {st.previousTeacher && (
+                          <div><span className="inline-block bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded text-[9px] font-bold border border-indigo-100">Prev: {st.previousTeacher}</span></div>
+                        )}
+                        {st.notes && (
+                          <div className="text-[10px] text-slate-600 leading-snug">{st.notes}</div>
+                        )}
+                        </div>
+                        </td>
+                        </tr>
+                      )
+                  })}
+                  </tbody>
+                  </table>
+                  </div>
+                )
+      })}
       </div>
     )
 }
@@ -1616,21 +1670,21 @@ function PrintSeparations({ studentsById, allIds }) {
 
     return (
       <div className="hidden print:block print-break-after">
-      <div className="mb-6 border-b pb-4">
-      <h1 className="text-xl font-bold text-gray-900 mb-1">Separation Constraints</h1>
+      <div className="mb-6 border-b-2 border-slate-200 pb-4">
+      <h1 className="text-2xl font-extrabold text-slate-900">Separation Constraints</h1>
       </div>
-      <table className="w-full text-sm border-collapse border border-gray-300">
+      <table className="w-full text-sm">
       <thead>
-      <tr className="bg-gray-100 text-left">
-      <th className="border border-gray-300 p-2 font-bold text-gray-900 w-1/3">Student</th>
-      <th className="border border-gray-300 p-2 font-bold text-gray-900">Must Be Separated From</th>
+      <tr>
+      <th className="w-1/3">Student</th>
+      <th>Must Be Separated From</th>
       </tr>
       </thead>
       <tbody>
       {separations.map((row, i) => (
-        <tr key={i} className="even:bg-gray-50">
-        <td className="border border-gray-300 p-2 font-semibold">{row.name}</td>
-        <td className="border border-gray-300 p-2">{row.targets}</td>
+        <tr key={i}>
+        <td className="font-bold text-slate-800">{row.name}</td>
+        <td className="text-slate-600">{row.targets}</td>
         </tr>
       ))}
       </tbody>
@@ -1650,8 +1704,6 @@ function GradeLevelStats({ allIds, studentsById, criteria }) {
       if (g === 'M') males++; else if (g === 'F') females++
     })
 
-    // CHANGED: Now filters by weight > 0 instead of c.enabled
-    // This ensures hidden factors are still calculated in the statistics
     const criteriaStats = criteria.filter(c => (c.weight ?? 0) > 0).map(crit => {
       const vals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
       return {
@@ -1666,38 +1718,38 @@ function GradeLevelStats({ allIds, studentsById, criteria }) {
   }, [allIds, studentsById, criteria])
 
   return (
-    <div className="mb-8 border-2 border-slate-200 print:border-0 rounded-2xl p-6 print:p-0 bg-slate-50 print:bg-white">
-    <h2 className="text-2xl font-bold text-slate-800 mb-4 border-b pb-2">Grade Level Statistics</h2>
-    <div className="grid grid-cols-3 gap-6 mb-6">
     <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Enrollment</div>
-    <div className="text-xl font-bold">{stats.totalCount} Students</div>
-    </div>
+    <h2 className="text-2xl font-extrabold text-slate-900 mb-6 border-b-2 border-slate-200 pb-2">Grade Level Statistics</h2>
+    <div className="grid grid-cols-3 gap-6 mb-8">
     <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Gender</div>
-    <div className="text-xl font-bold">{stats.males}M / {stats.females}F</div>
+    <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Enrollment</div>
+    <div className="text-2xl font-extrabold text-slate-800">{stats.totalCount} Students</div>
     </div>
     <div>
-    <div className="text-[10px] uppercase font-bold text-slate-500">Criteria Tracked</div>
-    <div className="text-xl font-bold">{stats.criteriaStats.length} Factors</div>
+    <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Gender Breakdown</div>
+    <div className="text-2xl font-extrabold text-slate-800">{stats.males}M / {stats.females}F</div>
+    </div>
+    <div>
+    <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Criteria Tracked</div>
+    <div className="text-2xl font-extrabold text-slate-800">{stats.criteriaStats.length} Factors</div>
     </div>
     </div>
-    <table className="w-full text-sm border-collapse">
+    <table className="w-full text-sm">
     <thead>
-    <tr className="bg-white">
-    <th className="border p-2 text-left">Balancing Factor</th>
-    <th className="border p-2 text-right">Average Score</th>
-    <th className="border p-2 text-right">Low</th>
-    <th className="border p-2 text-right">High</th>
+    <tr>
+    <th className="w-1/2 text-left">Balancing Factor</th>
+    <th className="text-center w-[16%]">Average Score</th>
+    <th className="text-center w-[16%]">Low Range</th>
+    <th className="text-center w-[16%]">High Range</th>
     </tr>
     </thead>
     <tbody>
     {stats.criteriaStats.map(s => (
       <tr key={s.label}>
-      <td className="border p-2 font-semibold">{s.label}</td>
-      <td className="border p-2 text-right font-mono">{s.avg}</td>
-      <td className="border p-2 text-right font-mono">{s.min}</td>
-      <td className="border p-2 text-right font-mono">{s.max}</td>
+      <td className="font-bold text-slate-800">{s.label}</td>
+      <td className="text-center font-mono font-medium text-slate-600">{s.avg}</td>
+      <td className="text-center font-mono font-medium text-slate-600">{s.min}</td>
+      <td className="text-center font-mono font-medium text-slate-600">{s.max}</td>
       </tr>
     ))}
     </tbody>
