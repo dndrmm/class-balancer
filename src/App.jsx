@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx'
  * CONFIGURATION & HELPERS
  * ========================================================================================= */
 
-const VERSION = 'v2.7.4'
+const VERSION = 'v3.0.0' // The fully polished, Per-Factor Optimization release!
 const BUILTIN_TAGS = ['504', 'IEP', 'ELL', 'Gifted', 'Speech']
 
 const scoreCache = new Map()
@@ -50,6 +50,7 @@ function Field({ label, children }) {
  * MATH & SCORING LOGIC
  * ========================================================================================= */
 
+// Kept purely for visual sorting and the "At-a-Glance" UI badges on student cards
 function getCompositeScore(studentsById, studentId, criteria, criteriaSig) {
   const cacheKey = studentId + '|' + criteriaSig
   const cached = scoreCache.get(cacheKey)
@@ -218,7 +219,7 @@ function Modal({ open, onClose, title, children }) {
 }
 
 /* =========================================================================================
- * BALANCING ALGORITHM
+ * BALANCING ALGORITHMS
  * ========================================================================================= */
 
 const findRoot = (parentMap, x) => {
@@ -235,128 +236,253 @@ const unionNodes = (parentMap, a, b) => {
   if (rootA !== rootB) parentMap.set(rootA, rootB)
 }
 
-function pickBestClassIndex(candidateIndexes, unitIds, classes, studentsById) {
-  if (candidateIndexes.length === 1) return candidateIndexes[0]
-
-    let bestIndex = candidateIndexes[0]
-    let bestScore = Infinity
-
-    for (const index of candidateIndexes) {
-      const classRoster = classes[index].studentIds
-      let M = 0, F = 0
-      for (const id of classRoster) {
-        const g = studentsById.get(id)?.gender
-        if (g === 'M') M++; else if (g === 'F') F++
-      }
-
-      const incomingM = unitIds.filter(id => studentsById.get(id)?.gender === 'M').length
-      const incomingF = unitIds.filter(id => studentsById.get(id)?.gender === 'F').length
-      const imbalance = Math.abs((M + incomingM) - (F + incomingF))
-
-      if (imbalance < bestScore) {
-        bestScore = imbalance
-        bestIndex = index
-      }
-    }
-    return bestIndex
-}
-
+// PER-FACTOR OPTIMIZATION ENGINE (Balanced Mode)
 function runAutoPlace(studentsById, allIds, numClasses, options) {
-  const { criteria, keepTogetherPairs, keepApartPairs, classMeta } = options
+  const { criteria, keepTogetherPairs, keepApartPairs, classMeta } = options;
+  const issues = [];
 
+  // 1. INITIALIZE CLASSES & CAPACITIES
   const classes = Array.from({ length: numClasses }, (_, i) => ({
     id: `Class ${i + 1}`,
     name: classMeta?.[i]?.name || `Class ${i + 1}`,
     studentIds: []
-  }))
+  }));
 
-  const baseTarget = Math.floor(allIds.length / numClasses)
-  const remainder = allIds.length % numClasses
-  const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0))
+  const baseTarget = Math.floor(allIds.length / numClasses);
+  const remainder = allIds.length % numClasses;
+  const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0));
 
-  const parentMap = new Map(allIds.map(id => [id, id]))
+  // 2. BUILD "UNITS" (Handle Keep Togethers) & RUN PRE-FLIGHT CHECKS
+  const parentMap = new Map(allIds.map(id => [id, id]));
   keepTogetherPairs.forEach(([a, b]) => {
-    if (a && b) unionNodes(parentMap, a, b)
-  })
+    if (a && b) unionNodes(parentMap, a, b);
+  });
 
-  const groups = new Map()
-  allIds.forEach(id => {
-    const root = findRoot(parentMap, id)
-    if (!groups.has(root)) groups.set(root, [])
-      groups.get(root).push(id)
-  })
+    const apartSet = new Set();
+    keepApartPairs.forEach(([a, b]) => {
+      apartSet.add(`${a}|${b}`);
+      apartSet.add(`${b}|${a}`);
+    });
 
-  const units = []
-  for (const groupIds of groups.values()) {
-    const pins = groupIds.map(id => studentsById.get(id)?.pinClass).filter(p => p !== null && p !== undefined)
-    const uniquePins = [...new Set(pins)]
+    const groups = new Map();
+    allIds.forEach(id => {
+      const root = findRoot(parentMap, id);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(id);
+    });
 
-    if (uniquePins.length > 0) {
-      units.push({ ids: groupIds, targetClassIndex: uniquePins[0] })
-    } else {
-      units.push({ ids: groupIds, targetClassIndex: null })
-    }
-  }
+    const units = [];
+    for (const groupIds of groups.values()) {
+      // PRE-FLIGHT: Pinning Conflicts
+      const pins = groupIds.map(id => {
+        const pin = studentsById.get(id)?.pinClass;
+        return pin !== null && pin !== undefined ? { id, pin } : null;
+      }).filter(Boolean);
 
-  const criteriaSig = makeCriteriaSignature(criteria)
-  const getUnitAvg = (ids) => {
-    const scoredIds = ids.filter(id => !studentsById.get(id)?.ignoreScores)
-    if (scoredIds.length === 0) return 0
-      return scoredIds.reduce((acc, id) => acc + getCompositeScore(studentsById, id, criteria, criteriaSig), 0) / scoredIds.length
-  }
+      const uniquePins = [...new Set(pins.map(p => p.pin))];
+      if (uniquePins.length > 1) {
+        const names = pins.map(p => studentsById.get(p.id)?.name).join(', ');
+        issues.push({
+          type: 'critical',
+          title: 'Pinning Conflict',
+          message: `Students bound by a "Keep With" rule are manually pinned to different classes (${names}). They were forced into ${classes[uniquePins[0]]?.name || 'the same class'} to maintain the group.`
+        });
+      }
 
-  const pinnedUnits = units.filter(u => u.targetClassIndex !== null)
-  const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => getUnitAvg(b.ids) - getUnitAvg(a.ids))
-
-  const apartSet = new Set(keepApartPairs.map(([a, b]) => `${a}|${b}`))
-
-  const violatesConstraints = (unitIds, classIndex) => {
-    const classRoster = classes[classIndex].studentIds
-    for (const newStudentId of unitIds) {
-      for (const existingStudentId of classRoster) {
-        if (apartSet.has(`${newStudentId}|${existingStudentId}`) || apartSet.has(`${existingStudentId}|${newStudentId}`)) {
-          return true
+      // PRE-FLIGHT: Internal Paradoxes
+      for (let i = 0; i < groupIds.length; i++) {
+        for (let j = i + 1; j < groupIds.length; j++) {
+          if (apartSet.has(`${groupIds[i]}|${groupIds[j]}`)) {
+            const n1 = studentsById.get(groupIds[i])?.name;
+            const n2 = studentsById.get(groupIds[j])?.name;
+            issues.push({
+              type: 'critical',
+              title: 'Logical Paradox',
+              message: `${n1} and ${n2} are set to be Kept Together AND Separated. The separation rule was ignored.`
+            });
+          }
         }
       }
-    }
-    return false
-  }
 
-  for (const unit of pinnedUnits) {
-    classes[unit.targetClassIndex].studentIds.push(...unit.ids)
-  }
-
-  for (const freeUnit of freeUnits) {
-    const unit = freeUnit
-    const currentSizes = classes.map(c => c.studentIds.length)
-    const minSize = Math.min(...currentSizes)
-
-    let candidates = classes.map((c, i) => i)
-    .filter(i => currentSizes[i] === minSize)
-    .filter(i => classes[i].studentIds.length + unit.ids.length <= capacities[i])
-    .filter(i => !violatesConstraints(unit.ids, i))
-
-    if (candidates.length === 0) {
-      candidates = classes.map((c, i) => i)
-      .sort((a, b) => currentSizes[a] - currentSizes[b])
-      .filter(i => !violatesConstraints(unit.ids, i))
+      units.push({
+        ids: groupIds,
+        targetClassIndex: uniquePins.length > 0 ? uniquePins[0] : null
+      });
     }
 
-    const chosenIndex = pickBestClassIndex(candidates, unit.ids, classes, studentsById)
+    // 3. CACHE GRADE-LEVEL TARGETS (Performance Optimization)
+    const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0);
+    const gradeTargets = {};
+    const activeWeights = {};
 
-    if (chosenIndex !== undefined) {
-      classes[chosenIndex].studentIds.push(...unit.ids)
-    } else {
-      const smallestIndex = classes.map((c, i) => ({ i, len: c.studentIds.length })).sort((a, b) => a.len - b.len)[0].i
-      classes[smallestIndex].studentIds.push(...unit.ids)
-    }
-  }
+    activeCriteria.forEach(crit => {
+      let sum = 0, count = 0;
+      allIds.forEach(id => {
+        const st = studentsById.get(id);
+        if (!st?.ignoreScores) {
+          sum += (Number(st.criteria?.[crit.label]) || 0);
+          count++;
+        }
+      });
+      gradeTargets[crit.label] = count > 0 ? (sum / count) : 0;
+      activeWeights[crit.label] = crit.weight || 1.0; // Cached weight multipliers
+    });
 
-  return { classes, capacities }
+    let totalM = 0, totalF = 0;
+    allIds.forEach(id => {
+      const g = studentsById.get(id)?.gender;
+      if (g === 'M') totalM++;
+      if (g === 'F') totalF++;
+    });
+      const targetM = totalM / numClasses;
+      const targetF = totalF / numClasses;
+
+      // 4. THE COST FUNCTION
+      const calculateCost = (classStudentIds) => {
+        let cost = 0;
+        let currentM = 0, currentF = 0;
+        let factorSums = {};
+        let factorCounts = {};
+
+        activeCriteria.forEach(c => {
+          factorSums[c.label] = 0;
+          factorCounts[c.label] = 0;
+        });
+
+        classStudentIds.forEach(id => {
+          const st = studentsById.get(id);
+          if (!st) return;
+          if (st.gender === 'M') currentM++;
+          if (st.gender === 'F') currentF++;
+
+          if (!st.ignoreScores) {
+            activeCriteria.forEach(c => {
+              factorSums[c.label] += (Number(st.criteria?.[c.label]) || 0);
+              factorCounts[c.label]++;
+            });
+          }
+        });
+
+        cost += Math.abs(currentM - targetM) * 10;
+        cost += Math.abs(currentF - targetF) * 10;
+
+        activeCriteria.forEach(c => {
+          const avg = factorCounts[c.label] > 0 ? (factorSums[c.label] / factorCounts[c.label]) : 0;
+          const diff = Math.abs(avg - gradeTargets[c.label]);
+          cost += (diff * diff) * activeWeights[c.label] * 5;
+        });
+
+        return cost;
+      };
+
+      const violatesConstraints = (unitIds, classRoster) => {
+        for (const newId of unitIds) {
+          for (const existingId of classRoster) {
+            if (apartSet.has(`${newId}|${existingId}`)) return true;
+          }
+        }
+        return false;
+      };
+
+      // 5. PHASE 1: PINNED STUDENTS & GREEDY DRAFT
+      const pinnedUnits = units.filter(u => u.targetClassIndex !== null);
+      const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => b.ids.length - a.ids.length);
+
+      pinnedUnits.forEach(u => classes[u.targetClassIndex].studentIds.push(...u.ids));
+
+      freeUnits.forEach(unit => {
+        let bestClassIndex = -1;
+        let lowestCost = Infinity;
+
+        for (let i = 0; i < numClasses; i++) {
+          if (classes[i].studentIds.length + unit.ids.length > capacities[i]) continue;
+          if (violatesConstraints(unit.ids, classes[i].studentIds)) continue;
+
+          const hypotheticalRoster = [...classes[i].studentIds, ...unit.ids];
+          const cost = calculateCost(hypotheticalRoster);
+
+          if (cost < lowestCost) {
+            lowestCost = cost;
+            bestClassIndex = i;
+          }
+        }
+
+        // AUDIT LOG: If no perfect placement exists
+        if (bestClassIndex === -1) {
+          bestClassIndex = classes.map((c, i) => ({ i, len: c.studentIds.length })).sort((a, b) => a.len - b.len)[0].i;
+          const studentNames = unit.ids.map(id => studentsById.get(id)?.name).join(', ');
+          issues.push({
+            type: 'error',
+            title: 'Forced Constraint Violation',
+            message: `Could not honor "Separate From" constraints for [${studentNames}]. They were forced into ${classes[bestClassIndex].name} because all other classes lacked capacity or caused conflicts.`
+          });
+        }
+
+        classes[bestClassIndex].studentIds.push(...unit.ids);
+      });
+
+      // 6. PHASE 2: OPTIMIZATION SWAPPER (Hill Climbing)
+      const MAX_ITERATIONS = 1000;
+
+      for (let i = 0; i < MAX_ITERATIONS; i++) {
+        const classAIdx = Math.floor(Math.random() * numClasses);
+        let classBIdx = Math.floor(Math.random() * numClasses);
+        if (classAIdx === classBIdx) classBIdx = (classBIdx + 1) % numClasses;
+
+        const unitsA = freeUnits.filter(u => u.ids.every(id => classes[classAIdx].studentIds.includes(id)));
+        const unitsB = freeUnits.filter(u => u.ids.every(id => classes[classBIdx].studentIds.includes(id)));
+
+        if (unitsA.length === 0 || unitsB.length === 0) continue;
+
+        const unitA = unitsA[Math.floor(Math.random() * unitsA.length)];
+        const unitB = unitsB[Math.floor(Math.random() * unitsB.length)];
+
+        const newLenA = classes[classAIdx].studentIds.length - unitA.ids.length + unitB.ids.length;
+        const newLenB = classes[classBIdx].studentIds.length - unitB.ids.length + unitA.ids.length;
+        if (newLenA > capacities[classAIdx] || newLenB > capacities[classBIdx]) continue;
+
+        const rosterAWo = classes[classAIdx].studentIds.filter(id => !unitA.ids.includes(id));
+        const rosterBWo = classes[classBIdx].studentIds.filter(id => !unitB.ids.includes(id));
+
+        if (violatesConstraints(unitA.ids, rosterBWo) || violatesConstraints(unitB.ids, rosterAWo)) continue;
+
+        const currentCostTotal = calculateCost(classes[classAIdx].studentIds) + calculateCost(classes[classBIdx].studentIds);
+
+        const rosterAWithB = [...rosterAWo, ...unitB.ids];
+        const rosterBWithA = [...rosterBWo, ...unitA.ids];
+        const newCostTotal = calculateCost(rosterAWithB) + calculateCost(rosterBWithA);
+
+        if (newCostTotal < currentCostTotal) {
+          classes[classAIdx].studentIds = rosterAWithB;
+          classes[classBIdx].studentIds = rosterBWithA;
+        }
+      }
+
+      // 7. POST-RUN DIAGNOSTICS
+      classes.forEach(c => {
+        let M = 0, F = 0;
+        c.studentIds.forEach(id => {
+          const g = studentsById.get(id)?.gender;
+          if (g === 'M') M++;
+          if (g === 'F') F++;
+        });
+          // If a class deviates from the average by more than 2, log a warning
+          if (Math.abs(M - targetM) >= 2.5 || Math.abs(F - targetF) >= 2.5) {
+            issues.push({
+              type: 'warning',
+              title: 'Severe Gender Imbalance',
+              message: `${c.name} has a disproportionate gender ratio (${M} Boys / ${F} Girls).`
+            });
+          }
+      });
+
+      return { classes, capacities, issues };
 }
 
+// LEVELED MODE ENGINE
 function runLeveledPlace(studentsById, allIds, numClasses, options) {
   const { criteria, levelOn, keepTogetherPairs, classMeta } = options
+  const issues = [];
 
   const classes = Array.from({ length: numClasses }, (_, i) => ({
     id: `Class ${i + 1}`,
@@ -431,7 +557,7 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
     }
   }
 
-  return { classes, capacities }
+  return { classes, capacities, issues }
 }
 
 /* =========================================================================================
@@ -597,6 +723,8 @@ export default function App() {
   const [hasManualChanges, setHasManualChanges] = useState(false)
   const [showConfirmModal, setShowConfirmModal] = useState(false)
   const [blockedMoveMessage, setBlockedMoveMessage] = useState(null)
+
+  const [runIssues, setRunIssues] = useState(null)
 
   const [mode, setMode] = useState('balanced')
   const [levelOn, setLevelOn] = useState('Composite')
@@ -787,6 +915,13 @@ export default function App() {
 
     setClasses(result.classes)
     setHasManualChanges(false)
+
+    if (result.issues && result.issues.length > 0) {
+      setRunIssues(result.issues)
+    } else {
+      setRunIssues(null)
+      displayStatus('Classes balanced successfully with no constraint violations!', 'success')
+    }
   }
 
   useEffect(() => {
@@ -939,7 +1074,6 @@ export default function App() {
       min-height: 0 !important; height: auto !important; overflow: visible !important;
     }
 
-    /* Ensure Tailwind backgrounds print for our modern badges */
     * {
       -webkit-print-color-adjust: exact !important;
       print-color-adjust: exact !important;
@@ -951,11 +1085,9 @@ export default function App() {
     .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
 
-    /* Modern, Clean Print Table UI */
     table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; margin-bottom: 2rem; }
     th, td { padding: 8px 6px; text-align: left; vertical-align: top; overflow: hidden; }
 
-    /* Heavy grid borders are gone, replaced with elegant bottom borders */
     th { color: #475569; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; border-bottom: 2px solid #cbd5e1; }
     td { border-bottom: 1px solid #e2e8f0; color: #1e293b; }
 
@@ -988,6 +1120,29 @@ export default function App() {
     </div>
     <div className="flex justify-end mt-6">
     <button onClick={() => setBlockedMoveMessage(null)} className="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-700">Got it</button>
+    </div>
+    </Modal>
+
+    <Modal open={!!runIssues} onClose={() => setRunIssues(null)} title="Optimization Report">
+    <div className="space-y-4">
+    <p className="text-sm text-slate-600 dark:text-slate-300">
+    The algorithm finished sorting, but encountered complex constraints it couldn't perfectly resolve. You will need to manually review the following issues:
+    </p>
+    <div className="max-h-96 overflow-y-auto space-y-3 pr-2">
+    {runIssues?.map((issue, idx) => (
+      <div key={idx} className={`p-3 rounded-xl border ${issue.type === 'critical' ? 'bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800' : issue.type === 'error' ? 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800' : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'}`}>
+      <div className={`font-bold text-sm mb-1 ${issue.type === 'critical' ? 'text-rose-700 dark:text-rose-400' : issue.type === 'error' ? 'text-orange-700 dark:text-orange-400' : 'text-amber-700 dark:text-amber-400'}`}>
+      {issue.type === 'critical' ? '🚨' : issue.type === 'error' ? '⚠️' : '📊'} {issue.title}
+      </div>
+      <div className={`text-xs ${issue.type === 'critical' ? 'text-rose-600 dark:text-rose-300' : issue.type === 'error' ? 'text-orange-600 dark:text-orange-300' : 'text-amber-600 dark:text-amber-300'}`}>
+      {issue.message}
+      </div>
+      </div>
+    ))}
+    </div>
+    <div className="flex justify-end pt-2">
+    <button onClick={() => setRunIssues(null)} className="px-5 py-2 rounded-lg bg-slate-800 text-white font-bold hover:bg-slate-700 transition">Acknowledge</button>
+    </div>
     </div>
     </Modal>
 
@@ -1038,7 +1193,14 @@ export default function App() {
     <Field label="Mode">
     <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg w-full">
     {['balanced', 'leveled'].map(m => (
-      <button key={m} onClick={() => setMode(m)} className={`flex-1 px-3 py-1.5 rounded-md text-sm font-bold capitalize transition-all ${mode === m ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-200 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{m}</button>
+      <button
+      key={m}
+      onClick={() => setMode(m)}
+      title={m === 'balanced' ? 'Balances each factor individually to create perfectly rounded classes' : 'Sorts students into tiered classes based on overall scores'}
+      className={`flex-1 px-3 py-1.5 rounded-md text-sm font-bold capitalize transition-all ${mode === m ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-200 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+      >
+      {m}
+      </button>
     ))}
     </div>
     </Field>
@@ -1093,6 +1255,9 @@ export default function App() {
     </div>
     </div>
 
+    {/* NEW: PRINT OPTIMIZATION ISSUES WARNING */}
+    <PrintIssues issues={runIssues} />
+
     <div className="mb-8">
     <h2 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider text-slate-500">Class Summaries</h2>
     <PrintOverview classes={classes} studentsById={studentsById} criteria={criteria} criteriaSig={criteriaSig} />
@@ -1132,8 +1297,19 @@ export default function App() {
       <div className="flex bg-white dark:bg-slate-700 rounded-lg p-0.5 border border-slate-200 dark:border-slate-600">
       {['Low', 'Normal', 'High'].map(label => {
         const isActive = c.weight === WEIGHT_MAP[label]
+        const tooltipText = label === 'High'
+        ? 'Strictly enforce balance for this factor (High Penalty)'
+        : label === 'Low'
+        ? 'Allow more variance to satisfy other constraints'
+        : 'Standard balancing priority'
+
         return (
-          <button key={label} className={`flex-1 py-1 text-[10px] font-bold rounded-md transition-all ${isActive ? 'bg-indigo-100 text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`} onClick={() => { setCriteria(prev => prev.map(x => x.label === c.label ? { ...x, weight: WEIGHT_MAP[label] } : x)); setHasManualChanges(true) }}>
+          <button
+          key={label}
+          title={tooltipText}
+          className={`flex-1 py-1 text-[10px] font-bold rounded-md transition-all ${isActive ? 'bg-indigo-100 text-indigo-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+          onClick={() => { setCriteria(prev => prev.map(x => x.label === c.label ? { ...x, weight: WEIGHT_MAP[label] } : x)); setHasManualChanges(true) }}
+          >
           {label}
           </button>
         )
@@ -1509,6 +1685,20 @@ function ManualPins({ allIds, studentsById, numClasses, setStudentsById, classes
           </div>
         )
     })}
+    </div>
+  )
+}
+
+function PrintIssues({ issues }) {
+  if (!issues || issues.length === 0) return null;
+  return (
+    <div className="mb-8 border-2 border-rose-200 bg-rose-50 p-4 rounded-lg print-break-inside-avoid">
+    <h2 className="text-lg font-bold text-rose-800 mb-2 uppercase tracking-wider">⚠ Optimization Warnings (Manual Review Needed)</h2>
+    <ul className="list-disc pl-5 space-y-1 text-rose-700 text-sm">
+    {issues.map((iss, i) => (
+      <li key={i}><strong>{iss.title}:</strong> {iss.message}</li>
+    ))}
+    </ul>
     </div>
   )
 }
