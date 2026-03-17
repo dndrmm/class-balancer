@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx'
  * CONFIGURATION & HELPERS
  * ========================================================================================= */
 
-const VERSION = 'v3.0.0' // The fully polished, Per-Factor Optimization release!
+const VERSION = 'v3.1.0' // Intermittent Crash Fixes & Aggressive Gender Balancing
 const BUILTIN_TAGS = ['504', 'IEP', 'ELL', 'Gifted', 'Speech']
 
 const scoreCache = new Map()
@@ -223,6 +223,7 @@ function Modal({ open, onClose, title, children }) {
  * ========================================================================================= */
 
 const findRoot = (parentMap, x) => {
+  if (!parentMap.has(x)) return x; // Safety fallback
   while (parentMap.get(x) !== x) {
     parentMap.set(x, parentMap.get(parentMap.get(x)))
     x = parentMap.get(x)
@@ -252,236 +253,257 @@ function runAutoPlace(studentsById, allIds, numClasses, options) {
   const remainder = allIds.length % numClasses;
   const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0));
 
-  // 2. BUILD "UNITS" (Handle Keep Togethers) & RUN PRE-FLIGHT CHECKS
+  // 2. SANITIZE CONSTRAINTS & BUILD UNITS
+  // This explicitly prevents ghost/deleted students from crashing the Union-Find map
+  const validKeepTogethers = keepTogetherPairs.filter(([a, b]) => studentsById.has(a) && studentsById.has(b));
+  const validKeepAparts = keepApartPairs.filter(([a, b]) => studentsById.has(a) && studentsById.has(b));
+
   const parentMap = new Map(allIds.map(id => [id, id]));
-  keepTogetherPairs.forEach(([a, b]) => {
-    if (a && b) unionNodes(parentMap, a, b);
+  validKeepTogethers.forEach(([a, b]) => {
+    unionNodes(parentMap, a, b);
   });
 
-    const apartSet = new Set();
-    keepApartPairs.forEach(([a, b]) => {
-      apartSet.add(`${a}|${b}`);
-      apartSet.add(`${b}|${a}`);
+  const apartSet = new Set();
+  validKeepAparts.forEach(([a, b]) => {
+    apartSet.add(`${a}|${b}`);
+    apartSet.add(`${b}|${a}`);
+  });
+
+  const groups = new Map();
+  allIds.forEach(id => {
+    const root = findRoot(parentMap, id);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(id);
+  });
+
+  const units = [];
+  for (const groupIds of groups.values()) {
+    // Catch Out-of-Bounds manual pins if the user reduced the class slider
+    const droppedPins = groupIds.filter(id => {
+      const pin = studentsById.get(id)?.pinClass;
+      return pin !== null && pin !== undefined && pin >= numClasses;
     });
 
-    const groups = new Map();
-    allIds.forEach(id => {
-      const root = findRoot(parentMap, id);
-      if (!groups.has(root)) groups.set(root, []);
-      groups.get(root).push(id);
-    });
-
-    const units = [];
-    for (const groupIds of groups.values()) {
-      // PRE-FLIGHT: Pinning Conflicts
-      const pins = groupIds.map(id => {
-        const pin = studentsById.get(id)?.pinClass;
-        return pin !== null && pin !== undefined ? { id, pin } : null;
-      }).filter(Boolean);
-
-      const uniquePins = [...new Set(pins.map(p => p.pin))];
-      if (uniquePins.length > 1) {
-        const names = pins.map(p => studentsById.get(p.id)?.name).join(', ');
-        issues.push({
-          type: 'critical',
-          title: 'Pinning Conflict',
-          message: `Students bound by a "Keep With" rule are manually pinned to different classes (${names}). They were forced into ${classes[uniquePins[0]]?.name || 'the same class'} to maintain the group.`
-        });
-      }
-
-      // PRE-FLIGHT: Internal Paradoxes
-      for (let i = 0; i < groupIds.length; i++) {
-        for (let j = i + 1; j < groupIds.length; j++) {
-          if (apartSet.has(`${groupIds[i]}|${groupIds[j]}`)) {
-            const n1 = studentsById.get(groupIds[i])?.name;
-            const n2 = studentsById.get(groupIds[j])?.name;
-            issues.push({
-              type: 'critical',
-              title: 'Logical Paradox',
-              message: `${n1} and ${n2} are set to be Kept Together AND Separated. The separation rule was ignored.`
-            });
-          }
-        }
-      }
-
-      units.push({
-        ids: groupIds,
-        targetClassIndex: uniquePins.length > 0 ? uniquePins[0] : null
+    if (droppedPins.length > 0) {
+      const names = droppedPins.map(id => studentsById.get(id)?.name).join(', ');
+      issues.push({
+        type: 'warning',
+        title: 'Invalid Manual Pin Ignored',
+        message: `The total number of classes was reduced, so the manual placement for [${names}] was ignored because their target class no longer exists.`
       });
     }
 
-    // 3. CACHE GRADE-LEVEL TARGETS (Performance Optimization)
-    const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0);
-    const gradeTargets = {};
-    const activeWeights = {};
+    const pins = groupIds.map(id => {
+      const pin = studentsById.get(id)?.pinClass;
+      return pin !== null && pin !== undefined && pin < numClasses ? { id, pin } : null;
+    }).filter(Boolean);
 
-    activeCriteria.forEach(crit => {
-      let sum = 0, count = 0;
-      allIds.forEach(id => {
-        const st = studentsById.get(id);
-        if (!st?.ignoreScores) {
-          sum += (Number(st.criteria?.[crit.label]) || 0);
-          count++;
-        }
+    const uniquePins = [...new Set(pins.map(p => p.pin))];
+    if (uniquePins.length > 1) {
+      const names = pins.map(p => studentsById.get(p.id)?.name).join(', ');
+      issues.push({
+        type: 'critical',
+        title: 'Pinning Conflict',
+        message: `Students bound by a "Keep With" rule are manually pinned to different classes (${names}). They were forced into ${classes[uniquePins[0]]?.name || 'the same class'} to maintain the group.`
       });
-      gradeTargets[crit.label] = count > 0 ? (sum / count) : 0;
-      activeWeights[crit.label] = crit.weight || 1.0; // Cached weight multipliers
-    });
+    }
 
-    let totalM = 0, totalF = 0;
-    allIds.forEach(id => {
-      const g = studentsById.get(id)?.gender;
-      if (g === 'M') totalM++;
-      if (g === 'F') totalF++;
-    });
-      const targetM = totalM / numClasses;
-      const targetF = totalF / numClasses;
-
-      // 4. THE COST FUNCTION
-      const calculateCost = (classStudentIds) => {
-        let cost = 0;
-        let currentM = 0, currentF = 0;
-        let factorSums = {};
-        let factorCounts = {};
-
-        activeCriteria.forEach(c => {
-          factorSums[c.label] = 0;
-          factorCounts[c.label] = 0;
-        });
-
-        classStudentIds.forEach(id => {
-          const st = studentsById.get(id);
-          if (!st) return;
-          if (st.gender === 'M') currentM++;
-          if (st.gender === 'F') currentF++;
-
-          if (!st.ignoreScores) {
-            activeCriteria.forEach(c => {
-              factorSums[c.label] += (Number(st.criteria?.[c.label]) || 0);
-              factorCounts[c.label]++;
-            });
-          }
-        });
-
-        cost += Math.abs(currentM - targetM) * 10;
-        cost += Math.abs(currentF - targetF) * 10;
-
-        activeCriteria.forEach(c => {
-          const avg = factorCounts[c.label] > 0 ? (factorSums[c.label] / factorCounts[c.label]) : 0;
-          const diff = Math.abs(avg - gradeTargets[c.label]);
-          cost += (diff * diff) * activeWeights[c.label] * 5;
-        });
-
-        return cost;
-      };
-
-      const violatesConstraints = (unitIds, classRoster) => {
-        for (const newId of unitIds) {
-          for (const existingId of classRoster) {
-            if (apartSet.has(`${newId}|${existingId}`)) return true;
-          }
-        }
-        return false;
-      };
-
-      // 5. PHASE 1: PINNED STUDENTS & GREEDY DRAFT
-      const pinnedUnits = units.filter(u => u.targetClassIndex !== null);
-      const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => b.ids.length - a.ids.length);
-
-      pinnedUnits.forEach(u => classes[u.targetClassIndex].studentIds.push(...u.ids));
-
-      freeUnits.forEach(unit => {
-        let bestClassIndex = -1;
-        let lowestCost = Infinity;
-
-        for (let i = 0; i < numClasses; i++) {
-          if (classes[i].studentIds.length + unit.ids.length > capacities[i]) continue;
-          if (violatesConstraints(unit.ids, classes[i].studentIds)) continue;
-
-          const hypotheticalRoster = [...classes[i].studentIds, ...unit.ids];
-          const cost = calculateCost(hypotheticalRoster);
-
-          if (cost < lowestCost) {
-            lowestCost = cost;
-            bestClassIndex = i;
-          }
-        }
-
-        // AUDIT LOG: If no perfect placement exists
-        if (bestClassIndex === -1) {
-          bestClassIndex = classes.map((c, i) => ({ i, len: c.studentIds.length })).sort((a, b) => a.len - b.len)[0].i;
-          const studentNames = unit.ids.map(id => studentsById.get(id)?.name).join(', ');
+    for (let i = 0; i < groupIds.length; i++) {
+      for (let j = i + 1; j < groupIds.length; j++) {
+        if (apartSet.has(`${groupIds[i]}|${groupIds[j]}`)) {
+          const n1 = studentsById.get(groupIds[i])?.name;
+          const n2 = studentsById.get(groupIds[j])?.name;
           issues.push({
-            type: 'error',
-            title: 'Forced Constraint Violation',
-            message: `Could not honor "Separate From" constraints for [${studentNames}]. They were forced into ${classes[bestClassIndex].name} because all other classes lacked capacity or caused conflicts.`
+            type: 'critical',
+            title: 'Logical Paradox',
+            message: `${n1} and ${n2} are set to be Kept Together AND Separated. The separation rule was ignored.`
           });
         }
+      }
+    }
 
-        classes[bestClassIndex].studentIds.push(...unit.ids);
+    units.push({
+      ids: groupIds,
+      targetClassIndex: uniquePins.length > 0 ? uniquePins[0] : null
+    });
+  }
+
+  // 3. CACHE GRADE-LEVEL TARGETS
+  const activeCriteria = criteria.filter(c => c.enabled !== false && (c.weight ?? 0) > 0);
+  const gradeTargets = {};
+  const activeWeights = {};
+
+  activeCriteria.forEach(crit => {
+    let sum = 0, count = 0;
+    allIds.forEach(id => {
+      const st = studentsById.get(id);
+      if (!st?.ignoreScores) {
+        sum += (Number(st.criteria?.[crit.label]) || 0);
+        count++;
+      }
+    });
+    gradeTargets[crit.label] = count > 0 ? (sum / count) : 0;
+    activeWeights[crit.label] = crit.weight || 1.0;
+  });
+
+  let totalM = 0, totalF = 0;
+  allIds.forEach(id => {
+    const g = studentsById.get(id)?.gender;
+    if (g === 'M') totalM++;
+    if (g === 'F') totalF++;
+  });
+    const targetM = totalM / numClasses;
+    const targetF = totalF / numClasses;
+
+    // 4. THE COST FUNCTION
+    const calculateCost = (classStudentIds) => {
+      let cost = 0;
+      let currentM = 0, currentF = 0;
+      let factorSums = {};
+      let factorCounts = {};
+
+      activeCriteria.forEach(c => {
+        factorSums[c.label] = 0;
+        factorCounts[c.label] = 0;
       });
 
-      // 6. PHASE 2: OPTIMIZATION SWAPPER (Hill Climbing)
-      const MAX_ITERATIONS = 1000;
+      classStudentIds.forEach(id => {
+        const st = studentsById.get(id);
+        if (!st) return;
+        if (st.gender === 'M') currentM++;
+        if (st.gender === 'F') currentF++;
 
-      for (let i = 0; i < MAX_ITERATIONS; i++) {
-        const classAIdx = Math.floor(Math.random() * numClasses);
-        let classBIdx = Math.floor(Math.random() * numClasses);
-        if (classAIdx === classBIdx) classBIdx = (classBIdx + 1) % numClasses;
+        if (!st.ignoreScores) {
+          activeCriteria.forEach(c => {
+            factorSums[c.label] += (Number(st.criteria?.[c.label]) || 0);
+            factorCounts[c.label]++;
+          });
+        }
+      });
 
-        const unitsA = freeUnits.filter(u => u.ids.every(id => classes[classAIdx].studentIds.includes(id)));
-        const unitsB = freeUnits.filter(u => u.ids.every(id => classes[classBIdx].studentIds.includes(id)));
+      // MASSIVE EXPONENTIAL PENALTY FOR GENDER IMBALANCE
+      const diffM = Math.abs(currentM - targetM);
+      const diffF = Math.abs(currentF - targetF);
+      cost += (diffM * diffM) * 50;
+      cost += (diffF * diffF) * 50;
 
-        if (unitsA.length === 0 || unitsB.length === 0) continue;
+      activeCriteria.forEach(c => {
+        const avg = factorCounts[c.label] > 0 ? (factorSums[c.label] / factorCounts[c.label]) : 0;
+        const diff = Math.abs(avg - gradeTargets[c.label]);
+        cost += (diff * diff) * activeWeights[c.label] * 5;
+      });
 
-        const unitA = unitsA[Math.floor(Math.random() * unitsA.length)];
-        const unitB = unitsB[Math.floor(Math.random() * unitsB.length)];
+      return cost;
+    };
 
-        const newLenA = classes[classAIdx].studentIds.length - unitA.ids.length + unitB.ids.length;
-        const newLenB = classes[classBIdx].studentIds.length - unitB.ids.length + unitA.ids.length;
-        if (newLenA > capacities[classAIdx] || newLenB > capacities[classBIdx]) continue;
+    const violatesConstraints = (unitIds, classRoster) => {
+      for (const newId of unitIds) {
+        for (const existingId of classRoster) {
+          if (apartSet.has(`${newId}|${existingId}`)) return true;
+        }
+      }
+      return false;
+    };
 
-        const rosterAWo = classes[classAIdx].studentIds.filter(id => !unitA.ids.includes(id));
-        const rosterBWo = classes[classBIdx].studentIds.filter(id => !unitB.ids.includes(id));
+    // 5. PHASE 1: PINNED STUDENTS & GREEDY DRAFT
+    const pinnedUnits = units.filter(u => u.targetClassIndex !== null);
+    const freeUnits = units.filter(u => u.targetClassIndex === null).sort((a, b) => b.ids.length - a.ids.length);
 
-        if (violatesConstraints(unitA.ids, rosterBWo) || violatesConstraints(unitB.ids, rosterAWo)) continue;
+    pinnedUnits.forEach(u => classes[u.targetClassIndex].studentIds.push(...u.ids));
 
-        const currentCostTotal = calculateCost(classes[classAIdx].studentIds) + calculateCost(classes[classBIdx].studentIds);
+    freeUnits.forEach(unit => {
+      let bestClassIndex = -1;
+      let lowestCost = Infinity;
 
-        const rosterAWithB = [...rosterAWo, ...unitB.ids];
-        const rosterBWithA = [...rosterBWo, ...unitA.ids];
-        const newCostTotal = calculateCost(rosterAWithB) + calculateCost(rosterBWithA);
+      for (let i = 0; i < numClasses; i++) {
+        if (classes[i].studentIds.length + unit.ids.length > capacities[i]) continue;
+        if (violatesConstraints(unit.ids, classes[i].studentIds)) continue;
 
-        if (newCostTotal < currentCostTotal) {
-          classes[classAIdx].studentIds = rosterAWithB;
-          classes[classBIdx].studentIds = rosterBWithA;
+        const hypotheticalRoster = [...classes[i].studentIds, ...unit.ids];
+        const cost = calculateCost(hypotheticalRoster);
+
+        if (cost < lowestCost) {
+          lowestCost = cost;
+          bestClassIndex = i;
         }
       }
 
-      // 7. POST-RUN DIAGNOSTICS
-      classes.forEach(c => {
-        let M = 0, F = 0;
-        c.studentIds.forEach(id => {
-          const g = studentsById.get(id)?.gender;
-          if (g === 'M') M++;
-          if (g === 'F') F++;
+      if (bestClassIndex === -1) {
+        const sortedClasses = classes.map((c, i) => ({ i, len: c.studentIds.length })).sort((a, b) => a.len - b.len);
+        bestClassIndex = sortedClasses.length > 0 ? sortedClasses[0].i : 0;
+
+        const studentNames = unit.ids.map(id => studentsById.get(id)?.name).join(', ');
+        issues.push({
+          type: 'error',
+          title: 'Forced Constraint Violation',
+          message: `Could not honor "Separate From" constraints for [${studentNames}]. They were forced into ${classes[bestClassIndex].name} because all other classes lacked capacity or caused conflicts.`
         });
-          // If a class deviates from the average by more than 2, log a warning
-          if (Math.abs(M - targetM) >= 2.5 || Math.abs(F - targetF) >= 2.5) {
-            issues.push({
-              type: 'warning',
-              title: 'Severe Gender Imbalance',
-              message: `${c.name} has a disproportionate gender ratio (${M} Boys / ${F} Girls).`
-            });
-          }
+      }
+
+      classes[bestClassIndex].studentIds.push(...unit.ids);
+    });
+
+    // 6. PHASE 2: OPTIMIZATION SWAPPER (Hill Climbing)
+    const MAX_ITERATIONS = 1000;
+
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const classAIdx = Math.floor(Math.random() * numClasses);
+      let classBIdx = Math.floor(Math.random() * numClasses);
+      if (classAIdx === classBIdx) classBIdx = (classBIdx + 1) % numClasses;
+
+      const unitsA = freeUnits.filter(u => u.ids.every(id => classes[classAIdx].studentIds.includes(id)));
+      const unitsB = freeUnits.filter(u => u.ids.every(id => classes[classBIdx].studentIds.includes(id)));
+
+      if (unitsA.length === 0 || unitsB.length === 0) continue;
+
+      const unitA = unitsA[Math.floor(Math.random() * unitsA.length)];
+      const unitB = unitsB[Math.floor(Math.random() * unitsB.length)];
+
+      const newLenA = classes[classAIdx].studentIds.length - unitA.ids.length + unitB.ids.length;
+      const newLenB = classes[classBIdx].studentIds.length - unitB.ids.length + unitA.ids.length;
+      if (newLenA > capacities[classAIdx] || newLenB > capacities[classBIdx]) continue;
+
+      const rosterAWo = classes[classAIdx].studentIds.filter(id => !unitA.ids.includes(id));
+      const rosterBWo = classes[classBIdx].studentIds.filter(id => !unitB.ids.includes(id));
+
+      if (violatesConstraints(unitA.ids, rosterBWo) || violatesConstraints(unitB.ids, rosterAWo)) continue;
+
+      const currentCostTotal = calculateCost(classes[classAIdx].studentIds) + calculateCost(classes[classBIdx].studentIds);
+
+      const rosterAWithB = [...rosterAWo, ...unitB.ids];
+      const rosterBWithA = [...rosterBWo, ...unitA.ids];
+      const newCostTotal = calculateCost(rosterAWithB) + calculateCost(rosterBWithA);
+
+      if (newCostTotal < currentCostTotal) {
+        classes[classAIdx].studentIds = rosterAWithB;
+        classes[classBIdx].studentIds = rosterBWithA;
+      }
+    }
+
+    // 7. POST-RUN DIAGNOSTICS
+    classes.forEach(c => {
+      let M = 0, F = 0;
+      c.studentIds.forEach(id => {
+        const g = studentsById.get(id)?.gender;
+        if (g === 'M') M++;
+        if (g === 'F') F++;
       });
 
-      return { classes, capacities, issues };
+        if (Math.abs(M - targetM) >= 2.5 || Math.abs(F - targetF) >= 2.5) {
+          issues.push({
+            type: 'warning',
+            title: 'Severe Gender Imbalance',
+            message: `${c.name} has a disproportionate gender ratio (${M} Boys / ${F} Girls).`
+          });
+        }
+    });
+
+    return { classes, capacities, issues };
 }
 
 // LEVELED MODE ENGINE
 function runLeveledPlace(studentsById, allIds, numClasses, options) {
-  const { criteria, levelOn, keepTogetherPairs, classMeta } = options
+  const { criteria, levelOn, keepTogetherPairs, keepApartPairs, classMeta } = options;
   const issues = [];
 
   const classes = Array.from({ length: numClasses }, (_, i) => ({
@@ -494,10 +516,13 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
   const remainder = allIds.length % numClasses
   const capacities = classes.map((_, i) => baseTarget + (i < remainder ? 1 : 0))
 
+  const validKeepTogethers = keepTogetherPairs.filter(([a, b]) => studentsById.has(a) && studentsById.has(b));
+
   const parentMap = new Map(allIds.map(id => [id, id]))
-  keepTogetherPairs.forEach(([a, b]) => {
-    if (a && b) unionNodes(parentMap, a, b)
+  validKeepTogethers.forEach(([a, b]) => {
+    unionNodes(parentMap, a, b)
   })
+
   const groups = new Map()
   allIds.forEach(id => {
     const root = findRoot(parentMap, id)
@@ -507,10 +532,14 @@ function runLeveledPlace(studentsById, allIds, numClasses, options) {
 
   const units = []
   for (const groupIds of groups.values()) {
-    const pins = groupIds.map(id => studentsById.get(id)?.pinClass).filter(p => p !== null && p !== undefined)
-    const uniquePins = [...new Set(pins)]
-    if (uniquePins.length > 0) units.push({ ids: groupIds, targetClassIndex: uniquePins[0] })
-      else units.push({ ids: groupIds, targetClassIndex: null })
+    const pins = groupIds.map(id => {
+      const pin = studentsById.get(id)?.pinClass;
+      return (pin !== null && pin !== undefined && pin < numClasses) ? pin : null;
+    }).filter(p => p !== null);
+
+    const uniquePins = [...new Set(pins)];
+    if (uniquePins.length > 0) units.push({ ids: groupIds, targetClassIndex: uniquePins[0] });
+    else units.push({ ids: groupIds, targetClassIndex: null });
   }
 
   const criteriaSig = makeCriteriaSignature(criteria)
@@ -1255,7 +1284,6 @@ export default function App() {
     </div>
     </div>
 
-    {/* NEW: PRINT OPTIMIZATION ISSUES WARNING */}
     <PrintIssues issues={runIssues} />
 
     <div className="mb-8">
