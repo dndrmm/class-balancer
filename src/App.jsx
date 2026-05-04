@@ -1108,14 +1108,15 @@ export default function App() {
       print-color-adjust: exact !important;
     }
 
-    @page { margin: 0.5cm; size: landscape; }
+    @page { margin: 0.4cm; size: landscape; }
 
     .no-print { display: none !important; }
     .print-break-after { break-after: page; page-break-after: always; }
     .print-full-width { width: 100% !important; max-width: none !important; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; margin-bottom: 2rem; }
-    th, td { padding: 8px 6px; text-align: left; vertical-align: top; overflow: hidden; }
+    /* TIGHTENED TABLE STYLES FOR BETTER FIT */
+    table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; margin-bottom: 1.5rem; }
+    th, td { padding: 4px 4px; text-align: left; vertical-align: top; overflow: hidden; }
 
     th { color: #475569; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; border-bottom: 2px solid #cbd5e1; }
     td { border-bottom: 1px solid #e2e8f0; color: #1e293b; }
@@ -1801,16 +1802,27 @@ function PrintClassRosters({ classes, studentsById, criteria, criteriaSig, sortM
               else if (sortMode === 'firstName') sortedIds.sort((a, b) => (studentsById.get(a)?.firstName || '').localeCompare(studentsById.get(b)?.firstName || ''))
 
                 return (
-                  <div key={c.id} className="print-break-after w-full mb-8">
-                  <h2 className="text-2xl font-extrabold text-slate-900 mb-4">{classMeta[idx]?.name || c.name || `Class ${idx + 1}`} Roster</h2>
-                  <table className="w-full">
+                  <div key={c.id} className="print-break-after w-full mb-6">
+                  <div className="flex items-baseline gap-3 mb-3 border-b-2 border-slate-200 pb-2">
+                  <h2 className="text-xl font-extrabold text-slate-900">{classMeta[idx]?.name || c.name || `Class ${idx + 1}`} Roster</h2>
+                  <span className="text-sm font-bold text-slate-500">({sortedIds.length} Students)</span>
+                  </div>
+
+                  <table className="w-full text-xs">
                   <thead>
                   <tr>
                   <th className="w-[18%]">Name</th>
-                  <th className="text-center w-[5%]">G</th>
-                  <th className="w-[12%]">Tags</th>
-                  {activeCriteria.length > 0 && <th className="text-center w-[8%]">Score</th>}
-                  <th className="w-[32%]">Factor Breakdown</th>
+                  <th className="text-center w-[4%]">G</th>
+                  <th className="w-[15%]">Tags</th>
+                  {activeCriteria.length > 0 && <th className="text-center w-[6%] text-indigo-800">OVR</th>}
+
+                  {/* Dynamic Spreadsheet Columns */}
+                  {activeCriteria.map(crit => (
+                    <th key={crit.label} className="text-center truncate" style={{ width: `${30 / activeCriteria.length}%` }} title={crit.label}>
+                    {crit.label.substring(0, 5)}
+                    </th>
+                  ))}
+
                   <th className="w-[25%]">Notes & Prev</th>
                   </tr>
                   </thead>
@@ -1818,43 +1830,31 @@ function PrintClassRosters({ classes, studentsById, criteria, criteriaSig, sortM
                   {sortedIds.map(id => {
                     const st = studentsById.get(id)
                     if (!st) return null
+
                       return (
                         <tr key={id}>
-                        <td className="font-bold text-sm text-slate-900">{st.lastName}, {st.firstName}</td>
+                        <td className="font-bold text-slate-900">{st.lastName}, {st.firstName}</td>
                         <td className="text-center font-medium text-slate-500">{st.gender}</td>
-                        <td>
-                        {st.tags && st.tags.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                          {st.tags.map(t => (
-                            <span key={t} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[9px] font-bold">{t}</span>
-                          ))}
-                          </div>
-                        ) : null}
+                        <td className="text-[10px]">
+                        {st.tags && st.tags.length > 0 ? st.tags.join(', ') : ''}
                         </td>
+
                         {activeCriteria.length > 0 && (
-                          <td className="text-center font-extrabold text-sm">
+                          <td className="text-center font-extrabold bg-slate-50/50">
                           {st.ignoreScores ? '-' : Math.round(getCompositeScore(studentsById, id, criteria, criteriaSig))}
                           </td>
                         )}
-                        <td>
-                        <div className="flex flex-wrap gap-1.5">
+
+                        {/* Dynamic Spreadsheet Rows */}
                         {activeCriteria.map(crit => (
-                          <span key={crit.label} className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded text-[9px] text-slate-700">
-                          <span className="font-bold text-slate-900">{crit.label.substring(0, 4)}:</span>
-                          <span>{st.ignoreScores ? '-' : (Number(st.criteria?.[crit.label]) || 0)}</span>
-                          </span>
+                          <td key={crit.label} className="text-center font-medium text-slate-700">
+                          {st.ignoreScores ? '-' : (Number(st.criteria?.[crit.label]) || 0)}
+                          </td>
                         ))}
-                        </div>
-                        </td>
-                        <td>
-                        <div className="flex flex-col gap-1.5">
-                        {st.previousTeacher && (
-                          <div><span className="inline-block bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded text-[9px] font-bold border border-indigo-100">Prev: {st.previousTeacher}</span></div>
-                        )}
-                        {st.notes && (
-                          <div className="text-[10px] text-slate-600 leading-snug">{st.notes}</div>
-                        )}
-                        </div>
+
+                        <td className="text-[10px] text-slate-700">
+                        {st.previousTeacher && <span className="font-bold mr-1">[{st.previousTeacher}]</span>}
+                        {st.notes}
                         </td>
                         </tr>
                       )
@@ -1923,12 +1923,16 @@ function GradeLevelStats({ allIds, studentsById, criteria }) {
     })
 
     const criteriaStats = criteria.filter(c => (c.weight ?? 0) > 0).map(crit => {
-      const vals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
+      const rawVals = activeIds.map(id => Number(studentsById.get(id)?.criteria?.[crit.label]) || 0)
+
+      // Filter out actual 0s so unscored students don't drag the minimum/average down
+      const validVals = rawVals.filter(v => v > 0)
+
       return {
         label: crit.label,
-        avg: vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : 0,
-                                                                        max: vals.length ? Math.max(...vals) : 0,
-                                                                        min: vals.length ? Math.min(...vals) : 0
+        avg: validVals.length ? (validVals.reduce((a, b) => a + b, 0) / validVals.length).toFixed(1) : 0,
+                                                                        max: validVals.length ? Math.max(...validVals) : 0,
+                                                                        min: validVals.length ? Math.min(...validVals) : 0
       }
     })
 
